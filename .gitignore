@@ -15,3 +15,8 @@ dist/
 *.spec
 Output/
 Audify_App.exe
+
+# Compilation scripts
+build_exe.bat
+installer.iss
+version_info.txt
