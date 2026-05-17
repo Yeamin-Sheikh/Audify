@@ -1,0 +1,9 @@
+edge-tts
+markdown
+beautifulsoup4
+pygame
+pyperclip
+pystray
+Pillow
+keyboard
+pynput

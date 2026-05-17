@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Application specific
+config.json
+history.log
+
+# Build files
+build/
+dist/
+*.spec
+Output/
+Audify_App.exe
