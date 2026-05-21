@@ -1,4 +1,4 @@
-# Audify v2.0.0
+# Audify v2.2.3
 
 A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices. Built to run invisibly in the System Tray.
 
@@ -8,7 +8,7 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 - **Wispr Flow Proof** — Ignores programmatic clipboard changes so it won't read your own dictations back to you.
 - **Single Instance Guard** — Only one Audify can run at a time. Launching a second shows a friendly notification.
 - **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon changes between green (active) and red (paused).
-- **Pronunciation Dictionary** — Map problem words to phonetic spellings (e.g., `GUI` → `gooey`) via a built-in GUI editor.
+- **Pronunciation Dictionary** — Map problem words to phonetic spellings (e.g., `GUI` -> `gooey`) via a built-in GUI editor.
 - **13 Neural Voices & 6 Speeds** — Switch voices and playback speed instantly from the tray context menu.
 - **Global Kill-Switch** — Press `Ctrl + Alt + S` anywhere to stop playback immediately.
 - **Smart Code Handling** — Replaces code blocks with "[Skipped code block]" instead of reading raw syntax.
@@ -20,7 +20,7 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 
 ### Installer (Recommended)
 
-1. Download **`Setup_Audify_2.0.0.exe`** from the [Releases](../../releases) page.
+1. Download **`Setup_Audify_2.2.3.exe`** from the [Releases](../../releases) page.
 2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
 3. Launch Audify. Look for the green circle icon in your System Tray.
 
@@ -36,12 +36,12 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 | Read text | Copy it with `Ctrl+C` — Audify reads it automatically |
 | Pause / Resume | Left-click the tray icon |
 | Stop playback | `Ctrl + Alt + S` (global hotkey) |
-| Change voice | Right-click tray → Voice |
-| Change speed | Right-click tray → Speed |
-| Edit pronunciations | Right-click tray → Pronunciation Dictionary |
-| Force-read clipboard | Right-click tray → Read Current Clipboard |
-| Copy last spoken text | Right-click tray → Copy Last Spoken |
-| Exit | Right-click tray → Exit |
+| Change voice | Right-click tray -> Voice |
+| Change speed | Right-click tray -> Speed |
+| Edit pronunciations | Right-click tray -> Pronunciation Dictionary |
+| Force-read clipboard | Right-click tray -> Read Current Clipboard |
+| Copy last spoken text | Right-click tray -> Copy Last Spoken |
+| Exit | Right-click tray -> Exit |
 
 ## Developer Guide
 
@@ -77,12 +77,20 @@ This produces `Audify.exe` in the project root.
 Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
 
 ```bash
-iscc installer.iss
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces `Output\Setup_Audify_2.0.0.exe`.
+This produces `Output\Setup_Audify_2.2.3.exe`.
 
 ## Changelog
+
+### v2.2.3
+
+- **Dynamic Resizable Layout** — Modernized the Audify Control Center to be fully resizable with a minimum constraint (`850x520`) to prevent visual clipping.
+- **Flexbox-style Input Scaling** — Refactored pronunciation editor gridding layout to dynamically stretch and fill space horizontally.
+- **Native Immersive Dark Title Bar** — Applied Win32 DWM API attributes to force a dark title bar header matching the dark mode theme.
+- **Pausing/Resuming Fixes** — Corrected TTS playback state management when toggling pause from the tray and dictionary interface.
+- **Process Lifecycle Guard** — Guaranteed complete cleanup of daemon threads and speech player objects on exit, leaving no rogue processes behind.
 
 ### v2.0.0
 
