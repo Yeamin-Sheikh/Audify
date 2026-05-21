@@ -5,18 +5,18 @@ __pycache__/
 venv/
 .env
 
-# Application specific
+# Application runtime files
 config.json
 history.log
 
-# Build files
+# Build artifacts
 build/
 dist/
 *.spec
 Output/
-Audify_App.exe
+*.exe
+*.bak
 
-# Compilation scripts
-build_exe.bat
-installer.iss
-version_info.txt
+# IDE / tools
+*.vbs
+out.txt
