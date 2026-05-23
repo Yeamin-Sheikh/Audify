@@ -37,7 +37,7 @@ from pystray import MenuItem as item
 
 from clean_text import markdown_to_text
 
-__version__ = "2.2.3"
+__version__ = "2.2.4"
 
 # -- Paths (relative to the script / exe location, not CWD) ---------------
 if getattr(sys, "frozen", False):
@@ -487,42 +487,64 @@ class TTSDaemon:
         await communicate.save(output_file)
 
     def _split_text(self, text: str) -> list[str]:
-        """Split text into natural sentence-based chunks of ~200 characters."""
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        """
+        Split text into natural paragraph and sentence-based chunks of ~800 characters.
+        Never splits in the middle of a sentence unless a single sentence exceeds 1000 characters.
+        This ensures transitions only occur at natural sentence pauses, sounding completely seamless.
+        """
+        # Split by paragraphs first
+        paragraphs = text.split("\n\n")
         chunks: list[str] = []
         current_chunk: list[str] = []
         current_len = 0
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
                 continue
-            if len(sentence) > 300:
-                sub_sentences = re.split(r"(?<=[,;])\s+", sentence)
-                for sub in sub_sentences:
-                    sub = sub.strip()
-                    if current_len + len(sub) > 200:
-                        if current_chunk:
-                            chunks.append(" ".join(current_chunk))
-                        current_chunk = [sub]
-                        current_len = len(sub)
-                    else:
-                        current_chunk.append(sub)
-                        current_len += len(sub) + 1
+                
+            # If paragraph itself fits in the remaining space of current chunk, add it whole
+            if current_len + len(para) <= 800:
+                current_chunk.append(para)
+                current_len += len(para) + 2  # +2 for double newline
+                continue
+                
+            # Otherwise, split paragraph into sentences
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
                     
-            else:
-                if current_len + len(sentence) > 200:
-                    if current_chunk:
-                        chunks.append(" ".join(current_chunk))
-                    current_chunk = [sentence]
-                    current_len = len(sentence)
+                # If a single sentence is exceptionally long (>1000 chars), split by clauses (commas, semicolons)
+                if len(sentence) > 1000:
+                    clauses = re.split(r"(?<=[,;])\s+", sentence)
+                    for clause in clauses:
+                        clause = clause.strip()
+                        if not clause:
+                            continue
+                        if current_len + len(clause) > 800:
+                            if current_chunk:
+                                chunks.append("\n\n".join(current_chunk) if "\n\n" in text else " ".join(current_chunk))
+                            current_chunk = [clause]
+                            current_len = len(clause)
+                        else:
+                            current_chunk.append(clause)
+                            current_len += len(clause) + 1
                 else:
-                    current_chunk.append(sentence)
-                    current_len += len(sentence) + 1
-                    
+                    # Normal sentence: if it exceeds target size, push current chunk and start a new one
+                    if current_len + len(sentence) > 800:
+                        if current_chunk:
+                            chunks.append("\n\n".join(current_chunk) if "\n\n" in text else " ".join(current_chunk))
+                        current_chunk = [sentence]
+                        current_len = len(sentence)
+                    else:
+                        current_chunk.append(sentence)
+                        current_len += len(sentence) + 1
+
         if current_chunk:
-            chunks.append(" ".join(current_chunk))
-            
+            chunks.append("\n\n".join(current_chunk) if "\n\n" in text else " ".join(current_chunk))
+
         return chunks if chunks else [text]
 
     def _generate_chunk(self, chunk_text: str) -> str | None:

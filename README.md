@@ -1,4 +1,4 @@
-# Audify v2.2.3
+# Audify v2.2.4
 
 A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices. Built to run invisibly in the System Tray.
 
@@ -20,7 +20,7 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 
 ### Installer (Recommended)
 
-1. Download **`Setup_Audify_2.2.3.exe`** from the [Releases](../../releases) page.
+1. Download **`Setup_Audify_2.2.4.exe`** from the [Releases](../../releases) page.
 2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
 3. Launch Audify. Look for the green circle icon in your System Tray.
 
@@ -80,9 +80,13 @@ Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces `Output\Setup_Audify_2.2.3.exe`.
+This produces `Output\Setup_Audify_2.2.4.exe`.
 
 ## Changelog
+
+### v2.2.4
+
+- **Seamless Audio Playback** — Redesigned the splitting algorithm to use natural sentence-aligned boundaries (`.!?`) and paragraph-preserving joins, expanding chunk size to ~800 characters. This completely eliminates abrupt pauses in the middle of sentences (commas/semicolons) and makes file transitions feel 100% seamless and natural.
 
 ### v2.2.3
 
