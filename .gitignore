@@ -22,3 +22,5 @@ config.*.tmp
 # IDE / tools
 *.vbs
 out.txt
+models/
+App/

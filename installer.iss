@@ -1,6 +1,6 @@
 [Setup]
 AppName=Audify
-AppVersion=2.6.1
+AppVersion=2.7.0
 AppPublisher=Sheikh Technologies
 DefaultDirName={autopf}\Audify
 DefaultGroupName=Audify
@@ -8,14 +8,17 @@ UninstallDisplayIcon={app}\logo.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=Setup_Audify_2.6.1
+OutputBaseFilename=Setup_Audify_2.7.0
 SetupIconFile=logo.ico
 ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 
 [Files]
-Source: "Audify.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "App\Audify\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Offline Kokoro voice model (so offline voices work immediately, no download)
+Source: "models\kokoro-v1.0.fp16.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
+Source: "models\voices-v1.0.bin"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

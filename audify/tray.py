@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import re
 import threading
@@ -20,6 +21,7 @@ from audify.config import (
     VOLUMES,
 )
 from audify.engine import TTSDaemon
+from audify.playback import KOKORO_PREFIX, rate_to_speed
 from audify.gui.control_center import show_dictionary_ui
 
 
@@ -63,24 +65,22 @@ def _enable_dark_mode() -> None:
 
 # -- Tray icon images --------------------------------------------------------
 #
-# A rounded tile in the logo's indigo/violet with a small sound-wave glyph.
-# Drawn at 4x and downsampled so edges stay smooth at 16-32px tray sizes.
+# A disc in the logo's indigo/violet carrying a bold "A" monogram whose
+# crossbar is a small sound wave. Drawn at 4x and downsampled so edges stay
+# smooth at 16-32px tray sizes. Paused swaps to a grey disc with pause bars.
 
 _ICON_SIZE = 64
 _SUPERSAMPLE = 4
 
-# (top colour, bottom colour) of the tile gradient per state
-_TILE_COLORS = {
-    "ready": ((99, 102, 241), (124, 58, 237)),     # indigo -> violet
+# (top colour, bottom colour) of the disc gradient per state
+_DISC_COLORS = {
+    "ready": ((99, 102, 241), (139, 92, 246)),     # indigo -> violet
     "speaking": ((56, 189, 248), (99, 102, 241)),  # sky -> indigo, brighter while talking
-    "paused": ((113, 113, 122), (63, 63, 70)),     # neutral grey
+    "paused": ((120, 120, 128), (72, 72, 80)),     # neutral grey
 }
 
-# Bar heights as a fraction of the glyph area: calm wave when idle, lively while speaking
-_BAR_HEIGHTS = {
-    "ready": (0.34, 0.62, 0.46, 0.26),
-    "speaking": (0.58, 1.0, 0.74, 0.46),
-}
+# Crossbar wave amplitude (fraction of icon size): livelier while speaking
+_WAVE_AMPLITUDE = {"ready": 0.027, "speaking": 0.05}
 
 _icon_cache: dict[str, Image.Image] = {}
 
@@ -91,38 +91,43 @@ def create_tray_icon(state: str) -> Image.Image:
         return _icon_cache[state]
 
     n = _ICON_SIZE * _SUPERSAMPLE
-    top, bottom = _TILE_COLORS[state]
+    top, bottom = _DISC_COLORS[state]
 
-    # Vertical gradient clipped to a rounded square
+    # Vertical gradient clipped to a circle
     gradient = Image.new("RGBA", (1, n))
     for y in range(n):
         t = y / (n - 1)
         gradient.putpixel((0, y), tuple(int(a + (b - a) * t) for a, b in zip(top, bottom)) + (255,))
     gradient = gradient.resize((n, n))
     mask = Image.new("L", (n, n), 0)
-    inset = n * 0.03
-    ImageDraw.Draw(mask).rounded_rectangle((inset, inset, n - inset, n - inset), radius=n * 0.24, fill=255)
+    inset = n * 0.025
+    ImageDraw.Draw(mask).ellipse((inset, inset, n - inset, n - inset), fill=255)
     image = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     image.paste(gradient, (0, 0), mask)
 
     d = ImageDraw.Draw(image)
     white = (255, 255, 255, 255)
     if state == "paused":
-        bar_w, gap, bar_h = n * 0.13, n * 0.12, n * 0.44
+        bar_w, gap, bar_h = n * 0.11, n * 0.11, n * 0.44
         x0 = (n - (2 * bar_w + gap)) / 2
         y0 = (n - bar_h) / 2
         for i in range(2):
             x = x0 + i * (bar_w + gap)
             d.rounded_rectangle((x, y0, x + bar_w, y0 + bar_h), radius=bar_w / 2, fill=white)
     else:
-        heights = _BAR_HEIGHTS[state]
-        bar_w, gap, glyph_h = n * 0.11, n * 0.07, n * 0.56
-        x0 = (n - (len(heights) * bar_w + (len(heights) - 1) * gap)) / 2
-        cy = n / 2
-        for i, h in enumerate(heights):
-            x = x0 + i * (bar_w + gap)
-            half = max(glyph_h * h, bar_w) / 2
-            d.rounded_rectangle((x, cy - half, x + bar_w, cy + half), radius=bar_w / 2, fill=white)
+        # Heavy geometric "A" (wide legs survive 16px), with a sound-wave crossbar
+        f = n / 256
+        d.polygon([(128 * f, 50 * f), (214 * f, 204 * f), (164 * f, 204 * f),
+                   (128 * f, 122 * f), (92 * f, 204 * f), (42 * f, 204 * f)], fill=white)
+        amp = n * _WAVE_AMPLITUDE[state]
+        x_start, x_end = 76 * f, 180 * f
+        steps = 52
+        points = [
+            (x_start + (x_end - x_start) * i / steps,
+             172 * f + amp * math.sin(i / steps * 2 * math.pi))
+            for i in range(steps + 1)
+        ]
+        d.line(points, fill=white, width=int(20 * f), joint="curve")
 
     icon = image.resize((_ICON_SIZE, _ICON_SIZE), Image.Resampling.LANCZOS)
     _icon_cache[state] = icon
@@ -136,7 +141,11 @@ def _voice_gender(label: str) -> str:
 
 
 def _short_voice_label(label: str) -> str:
-    """"Jenny (Natural Female)" -> "Jenny (Natural)"; the gender moves to a group header."""
+    """"Heart (Offline American Female)" -> "Heart (American)".
+
+    The gender moves to a group header and "Offline" to the submenu name.
+    """
+    label = label.replace("(Offline ", "(")
     return re.sub(r"\s*\b(Female|Male)\)", ")", label).replace(" ()", "")
 
 
@@ -154,7 +163,11 @@ def _speed_display_name(daemon: TTSDaemon) -> str:
     current = daemon.config.get("rate", "+0%")
     for label, rate in RATES.items():
         if rate == current:
-            return label.split(" (")[0]
+            name = label.split(" (")[0]
+            # Offline voices top out at 2x; say so instead of silently capping
+            if daemon.config.get("voice", "").startswith(KOKORO_PREFIX) and rate_to_speed(rate) > 2.0:
+                name += " (2x offline)"
+            return name
     return "Custom"
 
 
@@ -258,24 +271,48 @@ def setup_tray() -> None:
     def make_volume_setter(vol: float):
         return lambda icon, item_action: daemon.set_volume(vol)
 
-    # Voices grouped under disabled "Female voices" / "Male voices" headers
-    voice_menu_items: list = []
-    for gender in ("Female", "Male"):
-        group = [(label, v_id) for label, v_id in VOICES.items() if _voice_gender(label) == gender]
-        if not group:
-            continue
-        if voice_menu_items:
-            voice_menu_items.append(Menu.SEPARATOR)
-        voice_menu_items.append(item(f"{gender} voices", None, enabled=False))
-        voice_menu_items.extend(
-            item(
-                _short_voice_label(label),
-                make_voice_setter(v_id),
-                checked=lambda i, vid=v_id: daemon.config.get("voice") == vid,
-                radio=True,
+    def voice_group_items(voices: list[tuple[str, str]]) -> list:
+        """Voices under disabled "Female" / "Male" headers."""
+        items: list = []
+        for gender in ("Female", "Male"):
+            group = [(label, v_id) for label, v_id in voices if _voice_gender(label) == gender]
+            if not group:
+                continue
+            if items:
+                items.append(Menu.SEPARATOR)
+            items.append(item(gender, None, enabled=False))
+            items.extend(
+                item(
+                    _short_voice_label(label),
+                    make_voice_setter(v_id),
+                    checked=lambda i, vid=v_id: daemon.config.get("voice") == vid,
+                    radio=True,
+                )
+                for label, v_id in group
             )
-            for label, v_id in group
-        )
+        return items
+
+    def is_offline(v_id: str) -> bool:
+        return v_id.startswith(KOKORO_PREFIX)
+
+    online_voices = [(l, v) for l, v in VOICES.items() if not is_offline(v)]
+    offline_voices = [(l, v) for l, v in VOICES.items() if is_offline(v)]
+
+    # Voice > Online voices / Offline voices, each marked when it holds the current voice
+    voice_menu_items = [
+        item(
+            "Online voices (Microsoft)",
+            Menu(*voice_group_items(online_voices)),
+            checked=lambda i: not is_offline(daemon.config.get("voice", "")),
+            radio=True,
+        ),
+        item(
+            "Offline voices (Kokoro)",
+            Menu(*voice_group_items(offline_voices)),
+            checked=lambda i: is_offline(daemon.config.get("voice", "")),
+            radio=True,
+        ),
+    ]
 
     rate_menu_items = [
         item(

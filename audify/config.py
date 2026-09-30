@@ -207,6 +207,20 @@ VOICES: dict[str, str] = {
     "Andrew (Multilingual Male)": "en-US-AndrewMultilingualNeural",
     "Eric (Natural Male)": "en-US-EricNeural",
     "Roger (Natural Male)": "en-US-RogerNeural",
+    # Offline Kokoro voices (run on this PC; best-rated English voices first)
+    "Heart (Offline American Female)": "kokoro:af_heart",
+    "Bella (Offline American Female)": "kokoro:af_bella",
+    "Nicole (Offline American Female)": "kokoro:af_nicole",
+    "Sarah (Offline American Female)": "kokoro:af_sarah",
+    "Aoede (Offline American Female)": "kokoro:af_aoede",
+    "Kore (Offline American Female)": "kokoro:af_kore",
+    "Emma (Offline British Female)": "kokoro:bf_emma",
+    "Isabella (Offline British Female)": "kokoro:bf_isabella",
+    "Michael (Offline American Male)": "kokoro:am_michael",
+    "Fenrir (Offline American Male)": "kokoro:am_fenrir",
+    "Puck (Offline American Male)": "kokoro:am_puck",
+    "George (Offline British Male)": "kokoro:bm_george",
+    "Fable (Offline British Male)": "kokoro:bm_fable",
 }
 
 RATES: dict[str, str] = {

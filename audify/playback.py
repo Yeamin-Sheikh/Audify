@@ -8,6 +8,9 @@ of waiting for a finished MP3 file:
     Edge TTS websocket  --->  miniaudio MP3 -> PCM  --->  pygame channel queue
          MP3 bytes                 PCM blocks               gapless playback
 
+Offline Kokoro voices skip the network and the decoder: a producer thread
+synthesizes PCM directly and hands it to the same player.
+
 Everything stays in memory (no temp files). A session can be cancelled at
 any point (new text copied, stop hotkey) and every stage winds down promptly.
 """
@@ -16,10 +19,15 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import edge_tts
 import miniaudio
+
+if TYPE_CHECKING:
+    from audify.kokoro_engine import KokoroEngine
+
+KOKORO_PREFIX = "kokoro:"
 
 # Network limits: fail fast when offline instead of hanging the reader
 CONNECT_TIMEOUT = 5    # seconds to open the websocket
@@ -28,6 +36,26 @@ MAX_ATTEMPTS = 3
 
 # ~0.1s of audio per decoded block: small enough to start quickly
 DECODE_BLOCK_SECONDS = 0.1
+
+
+def rate_to_speed(rate: str) -> float:
+    """Edge-style rate ("+50%") -> speed multiplier (1.5)."""
+    try:
+        return 1.0 + int(rate.strip().rstrip("%")) / 100.0
+    except ValueError:
+        return 1.0
+
+
+def pause_after(text: str) -> float:
+    """Natural pause (seconds at 1x) to insert after an offline chunk, based on how it ends."""
+    end = text.rstrip()[-1:]
+    if not end:
+        return 0.0
+    if end in ".!?":
+        return 0.22
+    if end in ",;:":
+        return 0.1
+    return 0.0
 
 
 class _ChunkSource(miniaudio.StreamableSource):
@@ -75,6 +103,7 @@ class SpeechSession:
         mixer_format: tuple[int, int],
         resolve_text: Callable[[str], str] = lambda t: t,
         on_error: Callable[[str], None] | None = None,
+        kokoro: "KokoroEngine | None" = None,
     ) -> None:
         self.chunks = chunks
         self.voice = voice
@@ -86,13 +115,20 @@ class SpeechSession:
         self._resolve_text = resolve_text
         self._on_error = on_error
         self._feeds: list[queue.Queue[bytes | None]] = [queue.Queue() for _ in chunks]
+        self._kokoro = kokoro
+        self._kokoro_voice = voice[len(KOKORO_PREFIX):] if voice.startswith(KOKORO_PREFIX) else None
 
     def start(self) -> None:
+        if self._kokoro_voice and self._kokoro:
+            threading.Thread(target=self._produce_offline, daemon=True, name="kokoro-producer").start()
+            return
         asyncio.run_coroutine_threadsafe(self._produce(), self._loop)
         threading.Thread(target=self._decode, daemon=True, name="tts-decoder").start()
 
     def cancel(self) -> None:
         self.cancelled.set()
+        if self._kokoro_voice and self._kokoro:
+            self._kokoro.cancel(self)  # abort the in-flight synthesis instead of waiting it out
 
     # -- Producer: Edge TTS -> MP3 bytes (runs on the shared asyncio loop) ------
 
@@ -140,6 +176,42 @@ class SpeechSession:
                 if self.cancelled.is_set():
                     return None
         return f"Speech generation failed: {last_error}"
+
+    # -- Offline producer: Kokoro -> PCM (own thread) ---------------------------
+
+    def _produce_offline(self) -> None:
+        import numpy as np
+        from audify.kokoro_engine import SAMPLE_RATE, clamp_speed
+
+        speed = clamp_speed(rate_to_speed(self.rate))
+        try:
+            for i, text in enumerate(self.chunks):
+                if self.cancelled.is_set():
+                    break
+                samples = self._kokoro.synthesize(self._resolve_text(text), self._kokoro_voice, speed, owner=self)
+                if self.cancelled.is_set():
+                    break
+                pause = pause_after(text) / speed
+                if pause:
+                    samples = np.concatenate([samples, np.zeros(int(pause * SAMPLE_RATE), dtype=np.float32)])
+                self.pcm.put((i, self._to_mixer_pcm(samples, SAMPLE_RATE)))
+        except Exception as e:
+            if not self.cancelled.is_set() and self._on_error:
+                self._on_error(f"Offline voice failed: {e}")
+        finally:
+            self.pcm.put(None)
+
+    def _to_mixer_pcm(self, samples, source_rate: int) -> bytes:
+        """float32 mono -> 16-bit PCM in the mixer's rate and channel layout."""
+        import numpy as np
+
+        if source_rate != self._sample_rate:
+            n = int(len(samples) * self._sample_rate / source_rate)
+            samples = np.interp(np.linspace(0, len(samples) - 1, n), np.arange(len(samples)), samples)
+        pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+        if self._channels == 2:
+            pcm = np.repeat(pcm, 2)  # interleave identical left/right samples
+        return pcm.tobytes()
 
     # -- Decoder: MP3 bytes -> PCM blocks (own thread) --------------------------
 

@@ -19,7 +19,8 @@ import keyboard
 import pynput.mouse as pynput_mouse
 
 from audify.clipboard import ClipboardListener
-from audify.playback import SpeechSession
+from audify.kokoro_engine import KokoroEngine, find_models, download_models, split_for_streaming
+from audify.playback import KOKORO_PREFIX, SpeechSession
 from audify.config import (
     CONFIG_FILE,
     HISTORY_FILE,
@@ -62,6 +63,12 @@ class TTSDaemon:
 
         # Event-driven clipboard listener
         self._clip_listener = ClipboardListener(self._on_clipboard_change)
+
+        # Offline voices: loaded on first use (or warmed now if one is selected)
+        self.kokoro = KokoroEngine(notify=self._notify_info)
+        self._model_download_lock = threading.Lock()
+        if self.config.get("voice", "").startswith(KOKORO_PREFIX) and find_models():
+            self.kokoro.preload_async()
         
         # Tray icon (injected later)
         self.tray_icon = None
@@ -135,6 +142,11 @@ class TTSDaemon:
         with self._config_lock:
             self.config["voice"] = voice_id
             save_config(self.config)
+        if voice_id.startswith(KOKORO_PREFIX):
+            if find_models():
+                self.kokoro.preload_async()  # warm it so the first read is quick
+            else:
+                self._download_models_async()
         self._notify_state_change()
 
     def set_rate(self, rate_str: str) -> None:
@@ -344,6 +356,32 @@ class TTSDaemon:
             resolved_text = resolved_text.replace(placeholder, replacement)
         return resolved_text
 
+    def _notify_info(self, message: str) -> None:
+        print(f"[INFO] {message}")
+        if self.tray_icon:
+            try:
+                self.tray_icon.notify(message, "Audify")
+            except Exception:
+                pass
+
+    def _download_models_async(self) -> None:
+        """Fetch the offline voice model once, in the background."""
+        if not self._model_download_lock.acquire(blocking=False):
+            return  # already downloading
+
+        def run() -> None:
+            try:
+                self._notify_info("Downloading offline voices (about 200 MB). Using an online voice until it's done.")
+                download_models()
+                self._notify_info("Offline voices are ready.")
+                self.kokoro.preload_async()
+            except Exception as e:
+                self._notify_error(f"Could not download offline voices: {e}")
+            finally:
+                self._model_download_lock.release()
+
+        threading.Thread(target=run, daemon=True, name="kokoro-download").start()
+
     def _notify_error(self, message: str) -> None:
         print(f"[ERROR] {message}")
         if self.tray_icon:
@@ -398,23 +436,31 @@ class TTSDaemon:
             self.log_history(cleaned)
 
             try:
-                self._speak(self._split_text(cleaned), stop_generation)
+                self._speak(cleaned, stop_generation)
             except Exception as e:
                 print(f"[ERROR] Playback failed: {e}")
                 self._halt_channel()
             self._set_status("Ready")
 
-    def _speak(self, chunks: list[str], stop_generation: int) -> None:
+    def _speak(self, text: str, stop_generation: int) -> None:
         """Play one text: start a streaming session and feed its audio to the channel gaplessly."""
         with self._config_lock:
             voice = self.config.get("voice", "en-US-JennyNeural")
             rate = self.config.get("rate", "+50%")
         frequency, _size, channels = pygame.mixer.get_init()
 
+        offline = voice.startswith(KOKORO_PREFIX)
+        if offline and not self.kokoro.loaded and not find_models():
+            # Model not downloaded yet: fetch it in the background, read this one online
+            self._download_models_async()
+            voice, offline = "en-US-JennyNeural", False
+        chunks = split_for_streaming(text) if offline else self._split_text(text)
+
         session = SpeechSession(
             chunks, voice, rate, self._loop, (frequency, channels),
             resolve_text=self._resolve_code_blocks,
             on_error=self._notify_error,
+            kokoro=self.kokoro,
         )
         session.start()
 

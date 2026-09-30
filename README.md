@@ -1,15 +1,16 @@
-# Audify v2.6.1
+# Audify v2.7.0
 
-A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices. Built to run invisibly in the System Tray.
+A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices online, or natural-sounding Kokoro voices that run offline on your PC. Built to run invisibly in the System Tray.
 
 ## Features
 
 - **Smart Auto-Reader** — Monitors your clipboard. Copy text with `Ctrl+C` or `Ctrl+X` and it reads it aloud instantly.
 - **Wispr Flow Proof** — Ignores programmatic clipboard changes so it won't read your own dictations back to you.
 - **Single Instance Guard** — Only one Audify can run at a time. Launching a second shows a friendly notification.
-- **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon shows a violet sound wave when ready, turns blue while speaking, and grey with a pause symbol when paused.
+- **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon is a violet "A" monogram when ready, turns blue while speaking, and grey with a pause symbol when paused.
 - **Pronunciation Dictionary** — Map problem words to phonetic spellings (e.g., `GUI` -> `gooey`) via a built-in GUI editor.
-- **13 Neural Voices & 6 Speeds** — Switch voices and playback speed instantly from the tray context menu.
+- **26 Voices & 8 Speeds** — 13 online Microsoft Neural voices plus 13 offline Kokoro voices (American and British). Switch voices and speed instantly from the tray menu.
+- **Offline Voices** — Kokoro runs entirely on your PC: free, private, and no internet needed. It loads only when an offline voice is used and unloads after 5 idle minutes, so Audify stays light.
 - **Global Kill-Switch** — Press `Ctrl + Alt + S` anywhere to stop playback immediately.
 - **Smart Code Handling** — Replaces code blocks with "[Skipped code block]" instead of reading raw syntax.
 - **Zero-Gap Playback** — Seamless gapless chunk transitions using channel-queued audio (no silence between chunks).
@@ -23,14 +24,15 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 
 ### Installer (Recommended)
 
-1. Download **`Setup_Audify_2.6.1.exe`** from the [Releases](../../releases) page.
+1. Download **`Setup_Audify_2.7.0.exe`** from the [Releases](../../releases) page.
 2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
-3. Launch Audify. Look for the violet sound-wave icon in your System Tray.
+3. Launch Audify. Look for the violet "A" icon in your System Tray.
 
 ### Portable
 
 1. Download **`Audify.exe`** from the [Releases](../../releases) page.
 2. Place it anywhere and run. No installation needed.
+3. The first time you pick an offline voice, Audify downloads the voice model (~200 MB) once.
 
 ## Usage
 
@@ -63,6 +65,12 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Offline voices need the Kokoro model files in `models\` (the installer bundles them; from source they download on first use):
+
+```bash
+gh release download model-files-v1.0 --repo thewh1teagle/kokoro-onnx -D models -p "kokoro-v1.0.fp16.onnx" -p "voices-v1.0.bin"
+```
+
 ### Run from Source
 
 ```bash
@@ -75,7 +83,9 @@ python -m audify
 build_exe.bat
 ```
 
-This produces `Audify.exe` in the project root.
+This produces the portable `Audify.exe` in the project root and a folder build in `App\Audify\` that the installer uses (it starts faster because nothing is unpacked at launch).
+
+To check a build works (including offline voices), run `Audify.exe --selftest report.txt` and read the report.
 
 ### Build Installer
 
@@ -85,7 +95,7 @@ Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces `Output\Setup_Audify_2.6.1.exe`.
+This produces `Output\Setup_Audify_2.7.0.exe`.
 
 ### Project Structure
 
@@ -95,6 +105,8 @@ audify/
   __main__.py           # Entry point (single-instance guard)
   config.py             # Config constants, load/save, pronunciation dictionary
   engine.py             # TTSDaemon class (TTS pipeline, playback, clipboard)
+  playback.py           # Streaming speech sessions (Edge MP3 decode / Kokoro PCM -> gapless playback)
+  kokoro_engine.py      # Offline Kokoro voices: lazy load, idle unload, cancellable synthesis
   clipboard.py          # Win32 event-driven clipboard listener
   tray.py               # System tray icon and menu wiring
   gui/
@@ -106,6 +118,17 @@ config.json             # User settings (persisted between sessions)
 ```
 
 ## Changelog
+
+### v2.7.0
+
+- **Offline Voices (Kokoro)** — 13 natural-sounding voices that run entirely on your PC, free and without internet: Heart, Bella, Nicole, Sarah, Aoede, Kore, Michael, Fenrir, Puck (American) and Emma, Isabella, George, Fable (British). The online Microsoft voices are unchanged.
+- **Fast Offline Start** — Text is fed to Kokoro in pieces that start tiny and grow, so audio begins in ~0.5–0.85s on a 4-core laptop CPU and playback never waits for the next piece, even at 2x speed.
+- **Lightweight** — Kokoro loads only when an offline voice is used (warmed in the background when you pick one) and unloads after 5 idle minutes, returning Audify to ~70MB. Inference is limited to the physical CPU cores.
+- **Instant Stop/Switch** — Stopping or copying new text aborts the in-progress offline synthesis immediately instead of waiting for it to finish.
+- **New Tray Icon** — A bold "A" monogram (matching the logo) with a sound-wave crossbar; blue while speaking, grey with pause bars when paused.
+- **Voice Menu** — Voice now has "Online voices (Microsoft)" and "Offline voices (Kokoro)" submenus, each grouped into Female / Male. Speed shows "(2x offline)" when a faster speed is capped for offline voices.
+- **Faster Startup (installer)** — The installer now installs a folder build that doesn't unpack itself on every launch. The portable `Audify.exe` still works as a single file.
+- **Build Self-Test** — `Audify.exe --selftest report.txt` verifies a build can decode online audio and synthesize offline voices.
 
 ### v2.6.1
 
