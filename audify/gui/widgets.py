@@ -198,11 +198,12 @@ class FluentToggle(tk.Canvas):
         self.create_oval(kx1, ky1, kx2, ky2, fill=self.knob_color, outline="", width=0)
 
 
-def create_fluent_entry(parent, textvariable=None, width=20, bg="#1c1c1e", border_color="#3a3a3c", active_color="#0a84ff", fg="#ffffff", **kwargs) -> tuple[tk.Frame, tk.Entry]:
+def create_fluent_entry(parent, textvariable=None, width=20, bg="#1c1c1e", border_color="#3a3a3c", active_color="#0a84ff", fg="#ffffff", placeholder: str = "", placeholder_color: str = "#8e8e93", **kwargs) -> tuple[tk.Frame, tk.Entry]:
     """
     Wraps standard tk.Entry in a dual-frame structure for beautiful, high-contrast flat borders with focus glow.
+    An optional placeholder hint is shown while the field is empty.
     """
-    outer = tk.Frame(parent, bg=border_color, bd=0, highlightthickness=1, highlightbackground=border_color)
+    outer = tk.Frame(parent, bg=border_color, bd=0, highlightthickness=1, highlightbackground=border_color, highlightcolor=active_color)
     inner = tk.Frame(outer, bg=bg, bd=0)
     inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
     
@@ -219,15 +220,32 @@ def create_fluent_entry(parent, textvariable=None, width=20, bg="#1c1c1e", borde
         highlightthickness=0,
         **kwargs
     )
-    entry.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+    entry.pack(fill=tk.BOTH, expand=True, padx=10, pady=7)
+
+    if placeholder:
+        hint = tk.Label(inner, text=placeholder, bg=bg, fg=placeholder_color, font=("Segoe UI", 10), bd=0, cursor="xterm")
+        hint.bind("<Button-1>", lambda e: entry.focus_set())
+
+        def update_hint(*args):
+            # Read the variable itself: its write-trace can fire before the Entry redraws
+            text = textvariable.get() if textvariable is not None else entry.get()
+            if text:
+                hint.place_forget()
+            else:
+                hint.place(in_=entry, x=0, rely=0.5, anchor="w")
+
+        if textvariable is not None:
+            textvariable.trace_add("write", update_hint)
+        entry.bind("<KeyRelease>", update_hint, add="+")
+        entry.after_idle(update_hint)
     
     def on_focus_in(e):
-        outer.config(highlightbackground=active_color)
+        outer.config(highlightbackground=active_color, bg=active_color)
     def on_focus_out(e):
-        outer.config(highlightbackground=border_color)
+        outer.config(highlightbackground=border_color, bg=border_color)
         
-    entry.bind("<FocusIn>", on_focus_in)
-    entry.bind("<FocusOut>", on_focus_out)
+    entry.bind("<FocusIn>", on_focus_in, add="+")
+    entry.bind("<FocusOut>", on_focus_out, add="+")
     
     return outer, entry
 
@@ -235,9 +253,11 @@ def create_fluent_entry(parent, textvariable=None, width=20, bg="#1c1c1e", borde
 def create_modern_btn(
     parent, text: str, command, primary: bool = False,
     accent_color: str = "#0a84ff", accent_hover: str = "#2693ff",
+    danger: bool = False,
 ) -> tk.Button:
+    """Flat button. ``primary`` uses the accent fill; ``danger`` turns red on hover."""
     btn_bg = accent_color if primary else "#3a3a3c"
-    btn_active = accent_hover if primary else "#48484a"
+    btn_active = accent_hover if primary else ("#c42b1c" if danger else "#48484a")
     
     btn = tk.Button(
         parent,
@@ -247,16 +267,18 @@ def create_modern_btn(
         fg="#ffffff",
         activebackground=btn_active,
         activeforeground="#ffffff",
+        disabledforeground="#6e6e73",
         font=("Segoe UI Semibold", 9),
         bd=0,
         relief="flat",
-        padx=14,
-        pady=5,
+        padx=16,
+        pady=7,
         cursor="hand2"
     )
     
     def on_enter(e):
-        btn.config(bg=btn_active)
+        if str(btn["state"]) != "disabled":
+            btn.config(bg=btn_active)
     def on_leave(e):
         btn.config(bg=btn_bg)
         

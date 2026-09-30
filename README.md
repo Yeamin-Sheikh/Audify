@@ -1,4 +1,4 @@
-# Audify v2.5.0
+# Audify v2.6.0
 
 A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices. Built to run invisibly in the System Tray.
 
@@ -7,7 +7,7 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 - **Smart Auto-Reader** — Monitors your clipboard. Copy text with `Ctrl+C` or `Ctrl+X` and it reads it aloud instantly.
 - **Wispr Flow Proof** — Ignores programmatic clipboard changes so it won't read your own dictations back to you.
 - **Single Instance Guard** — Only one Audify can run at a time. Launching a second shows a friendly notification.
-- **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon changes between green (active) and red (paused).
+- **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon shows a violet sound wave when ready, turns blue while speaking, and grey with a pause symbol when paused.
 - **Pronunciation Dictionary** — Map problem words to phonetic spellings (e.g., `GUI` -> `gooey`) via a built-in GUI editor.
 - **13 Neural Voices & 6 Speeds** — Switch voices and playback speed instantly from the tray context menu.
 - **Global Kill-Switch** — Press `Ctrl + Alt + S` anywhere to stop playback immediately.
@@ -23,9 +23,9 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 
 ### Installer (Recommended)
 
-1. Download **`Setup_Audify_2.5.0.exe`** from the [Releases](../../releases) page.
+1. Download **`Setup_Audify_2.6.0.exe`** from the [Releases](../../releases) page.
 2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
-3. Launch Audify. Look for the green circle icon in your System Tray.
+3. Launch Audify. Look for the violet sound-wave icon in your System Tray.
 
 ### Portable
 
@@ -41,10 +41,12 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 | Stop playback | `Ctrl + Alt + S` (global hotkey) |
 | Change voice | Right-click tray -> Voice |
 | Change speed | Right-click tray -> Speed |
-| Edit pronunciations | Right-click tray -> Audify Control Center |
-| Force-read clipboard | Right-click tray -> Read Current Clipboard |
-| Copy last spoken text | Right-click tray -> Copy Last Spoken |
-| Exit | Right-click tray -> Exit |
+| Change volume | Right-click tray -> Volume |
+| Skip code blocks | Right-click tray -> Skip Code Blocks |
+| Edit pronunciations | Right-click tray -> Control Center... |
+| Force-read clipboard | Right-click tray -> Read Clipboard Now |
+| Re-read last text | Right-click tray -> Replay Last |
+| Exit | Right-click tray -> Quit Audify |
 
 ## Developer Guide
 
@@ -83,7 +85,7 @@ Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces `Output\Setup_Audify_2.5.0.exe`.
+This produces `Output\Setup_Audify_2.6.0.exe`.
 
 ### Project Structure
 
@@ -104,6 +106,18 @@ config.json             # User settings (persisted between sessions)
 ```
 
 ## Changelog
+
+### v2.6.0
+
+- **Redesigned Control Center** — Fixed-width settings sidebar with Playback / Reading sections, flat dark dropdowns with a Windows 11 chevron, a stop-hotkey hint, and a borderless striped rule table with a live rule count, search placeholder and empty states.
+- **Better Rule Editor** — Labelled inputs with example placeholders, an "Add Rule" / "Update Rule" button that reflects whether the word exists, a Clear button, multi-select removal, and a short confirmation after each change.
+- **Keyboard Shortcuts** — `Enter` saves a rule, `Esc` clears the editor or search, `Delete` removes selected rules, `Ctrl+F` jumps to search, double-click edits a rule.
+- **Layout Fixes** — The volume slider no longer inflates the sidebar to ~570px on scaled displays, which had been clipping the dictionary table and squashing the editor inputs. DPI awareness is now set before the window is created.
+- **New Tray Icon** — A violet sound-wave tile matching the logo, with distinct Ready, Speaking and Paused states that stay legible at 16px.
+- **Redesigned Tray Menu** — Live status in the header, current voice / speed / volume right-aligned, voices grouped into Female / Male, a Skip Code Blocks checkbox, the stop hotkey shown next to Stop Speaking, and items greyed out when they don't apply.
+- **Live Tray Sync** — Changes made in the Control Center now appear in the tray menu immediately (previously the menu only refreshed after a tray click).
+- **Single-Instance Control Center** — Opening it again brings the existing window to the front instead of starting a second one.
+- **Bug Fix** — Rules for numeric words (e.g. `1`) could not be edited or removed.
 
 ### v2.5.0
 

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 import pygame
@@ -63,6 +64,11 @@ class TTSDaemon:
         
         # Tray icon (injected later)
         self.tray_icon = None
+
+        # Playback status shown by the tray; the tray registers on_state_change to redraw
+        self.status: str = "Ready"
+        self.is_speaking: bool = False
+        self.on_state_change: Callable[[], None] | None = None
 
         # Clear stale history from previous session
         if os.path.exists(HISTORY_FILE):
@@ -125,12 +131,14 @@ class TTSDaemon:
         with self._config_lock:
             self.config["voice"] = voice_id
             save_config(self.config)
+        self._notify_state_change()
 
     def set_rate(self, rate_str: str) -> None:
         """Change the speech rate and persist to config. Changes apply on next chunk playback."""
         with self._config_lock:
             self.config["rate"] = rate_str
             save_config(self.config)
+        self._notify_state_change()
 
     def set_volume(self, vol: float) -> None:
         """Change immediate mixer volume (0.0 to 1.0) and save to config."""
@@ -138,6 +146,7 @@ class TTSDaemon:
             self.config["volume"] = vol
         self._tts_channel.set_volume(vol)
         self._debounced_save()
+        self._notify_state_change()
 
     def toggle_skip_code_blocks(self) -> None:
         """Toggle skipping of fenced code blocks and save to config."""
@@ -145,6 +154,7 @@ class TTSDaemon:
             current = self.config.get("skip_code_blocks", True)
             self.config["skip_code_blocks"] = not current
             save_config(self.config)
+        self._notify_state_change()
 
     # -- Playback controls -------------------------------------------------
 
@@ -214,10 +224,18 @@ class TTSDaemon:
 
     # -- Tray Updates ------------------------------------------------------
     
-    def _update_tray_title(self, title: str) -> None:
-        """Update the tray icon hover text."""
-        if self.tray_icon:
-            self.tray_icon.title = title
+    def _set_status(self, status: str, speaking: bool = False) -> None:
+        """Record the playback status and let the tray redraw its icon, tooltip and menu."""
+        self.status = status
+        self.is_speaking = speaking
+        self._notify_state_change()
+
+    def _notify_state_change(self) -> None:
+        if self.on_state_change:
+            try:
+                self.on_state_change()
+            except Exception as e:
+                print(f"[WARN] Tray refresh failed: {e}")
 
     # -- History -----------------------------------------------------------
 
@@ -420,7 +438,7 @@ class TTSDaemon:
                         self._safe_remove(f)
                     continue
 
-            self._update_tray_title(f"Audify — Reading (1/{len(chunks)})")
+            self._set_status("Reading" if len(chunks) == 1 else f"Reading 1 of {len(chunks)}", speaking=True)
             first_sound = pygame.mixer.Sound(first_path)
             with self._config_lock:
                 vol = self.config.get("volume", 1.0)
@@ -467,7 +485,7 @@ class TTSDaemon:
                     
                 temp_files.append(next_path)
                 
-                self._update_tray_title(f"Audify — Reading ({i+1}/{len(chunks)})")
+                self._set_status(f"Reading {i+1} of {len(chunks)}", speaking=True)
                 next_sound = pygame.mixer.Sound(next_path)
                 with self._config_lock:
                     vol = self.config.get("volume", 1.0)
@@ -484,7 +502,7 @@ class TTSDaemon:
             for f in temp_files:
                 self._safe_remove(f)
                 
-            self._update_tray_title("Audify (Active — Ready)")
+            self._set_status("Ready")
 
         try:
             executor.shutdown(wait=False)
