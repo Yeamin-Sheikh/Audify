@@ -79,13 +79,35 @@ def markdown_to_text(
     # Collapse repeated spaces/newlines
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Apply pronunciation fixes using regex word boundaries.
+    # Apply non-alpha substitutions first (symbols like =>, ->, &&, etc.)
+    # These use simple str.replace since they don't have word boundaries.
     for bad_word, good_word in pronunciation_dict.items():
-        if bad_word.isalpha():
-            pattern: str = r"\b" + re.escape(bad_word) + r"\b"
-            # Use lambda callback to treat the replacement string 100% literally and prevent escape errors
-            text = re.sub(pattern, lambda m, gw=good_word: gw, text, flags=re.IGNORECASE)
-        else:
+        if not bad_word.isalpha():
             text = text.replace(bad_word, good_word)
+
+    # Build a single combined regex for all alpha words and apply in one pass.
+    # Sorted longest-first so "JavaScript" matches before "Java", preventing
+    # partial replacement of compound words.
+    alpha_words = [w for w in pronunciation_dict if w.isalpha()]
+    if alpha_words:
+        alpha_words.sort(key=len, reverse=True)
+        combined_pattern = re.compile(
+            r"\b(" + "|".join(re.escape(w) for w in alpha_words) + r")\b",
+            re.IGNORECASE,
+        )
+
+        def _lookup(m: re.Match) -> str:
+            """Case-insensitive dict lookup for the matched word."""
+            word = m.group(0)
+            # Try exact case first, then common casing variants
+            return pronunciation_dict.get(
+                word,
+                pronunciation_dict.get(
+                    word.upper(),
+                    pronunciation_dict.get(word.capitalize(), word),
+                ),
+            )
+
+        text = combined_pattern.sub(_lookup, text)
 
     return text.strip(), code_blocks
