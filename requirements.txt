@@ -2,8 +2,8 @@ edge-tts==7.2.8
 markdown==3.10.2
 beautifulsoup4==4.14.3
 pygame==2.6.1
-pyperclip==1.11.0
 pystray==0.19.5
 Pillow==12.2.0
 keyboard==0.13.5
 pynput==1.8.2
+miniaudio==1.71

@@ -23,7 +23,7 @@ def main() -> None:
         ctypes.windll.user32.MessageBoxW(
             0,
             "Audify is already running in the system tray.\n\n"
-            "Look for the green/red circle icon near the clock.",
+            "Look for the violet sound-wave icon near the clock.",
             "Audify — Already Running",
             0x40,  # MB_ICONINFORMATION
         )

@@ -11,10 +11,13 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import threading
+import time
 from typing import Callable
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+# Private DLL handles: ctypes.windll hands every module the SAME function objects, so
+# another library setting e.g. GlobalLock.restype (pyperclip does) would break ours.
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # Win32 message constants
 WM_DESTROY = 0x0002
@@ -96,10 +99,26 @@ user32.CloseClipboard.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
 user32.GetClipboardData.restype = wintypes.HANDLE
 
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
 kernel32.GlobalLock.restype = ctypes.c_wchar_p
 kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
 kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+
+def _open_clipboard(attempts: int = 10, delay: float = 0.01) -> bool:
+    """Open the clipboard, retrying while another app still has it open.
+
+    Right after a copy, the source app (or a clipboard manager) often holds the
+    clipboard for a few milliseconds; a single attempt would silently miss the copy.
+    """
+    for attempt in range(attempts):
+        if user32.OpenClipboard(None):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay)
+    return False
 
 
 def get_clipboard_text() -> str:
@@ -107,7 +126,7 @@ def get_clipboard_text() -> str:
 
     Returns an empty string if the clipboard is empty or doesn't contain text.
     """
-    if not user32.OpenClipboard(None):
+    if not _open_clipboard():
         return ""
     try:
         handle = user32.GetClipboardData(CF_UNICODETEXT)

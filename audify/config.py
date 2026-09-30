@@ -4,10 +4,14 @@ Configuration constants and load/save helpers for Audify.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
 
 # -- Paths (relative to the script / exe location, not CWD) ---------------
 if getattr(sys, "frozen", False):
@@ -17,6 +21,7 @@ else:
     _SCRIPT_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_FILE: str = os.path.join(_SCRIPT_DIR, "config.json")
+CONFIG_BACKUP_FILE: str = CONFIG_FILE + ".bak"
 HISTORY_FILE: str = os.path.join(_SCRIPT_DIR, "history.log")
 
 # -- Large standard technical dictionary (150+ terms) ----------------------
@@ -183,6 +188,8 @@ DEFAULT_CONFIG: dict = {
     "skip_code_blocks": True,
     "stop_hotkey": "ctrl+alt+s",
     "pronunciation_dict": {},
+    # Built-in rules the user deleted; never re-added on startup
+    "removed_default_rules": [],
 }
 
 # -- Speech option definitions (Global Scope for Unified Access) -----------
@@ -230,26 +237,50 @@ VOLUMES: dict[str, float] = {
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
-def load_config() -> dict:
-    """Load user config from disk, falling back to defaults and merging library items."""
-    config = DEFAULT_CONFIG.copy()
-    
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                config.update(loaded)
-        except Exception as e:
-            print(f"[WARN] Error loading config: {e}. Using defaults.")
+_save_lock = threading.Lock()
 
-    # Auto-merge missing library items into the config's dictionary
+
+def _read_config_file(path: str) -> dict | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[WARN] Could not read {os.path.basename(path)}: {e}")
+        return None
+
+
+def load_config() -> dict:
+    """Load user config from disk, falling back to the backup, then to defaults."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+
+    loaded = _read_config_file(CONFIG_FILE)
+    loaded_from_main = loaded is not None
+    if loaded is None and os.path.exists(CONFIG_FILE):
+        # Keep the unreadable file for inspection instead of silently overwriting it
+        try:
+            os.replace(CONFIG_FILE, CONFIG_FILE + ".corrupt")
+        except Exception:
+            pass
+        loaded = _read_config_file(CONFIG_BACKUP_FILE)
+        if loaded is not None:
+            print("[WARN] config.json was unreadable; restored settings from backup.")
+    elif loaded is None:
+        loaded = _read_config_file(CONFIG_BACKUP_FILE)
+    if loaded:
+        config.update(loaded)
+
+    # Auto-merge built-in rules the user hasn't got yet, skipping ones they deleted
     user_dict = config.setdefault("pronunciation_dict", {})
-    changed = False
+    removed = set(config.setdefault("removed_default_rules", []))
+    changed = not loaded_from_main  # rewrite config.json if it was missing or restored
     for k, v in DEFAULT_PRONUNCIATION.items():
-        if k not in user_dict:
+        if k not in user_dict and k not in removed:
             user_dict[k] = v
             changed = True
-            
+
     if changed:
         save_config(config)
 
@@ -257,12 +288,54 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    """Persist configuration to disk as JSON."""
+    """Persist configuration atomically, keeping the previous good file as a backup.
+
+    Writes to a temp file and swaps it in, so a crash or power loss mid-save can
+    never leave a half-written config.json behind.
+    """
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4)
-    except Exception as e:
-        print(f"[WARN] Error saving config: {e}")
+        data = json.dumps(config, indent=4)
+    except Exception as e:  # e.g. dict mutated by another thread mid-serialization
+        print(f"[WARN] Error serializing config: {e}")
+        return
+
+    with _save_lock:
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="config.", suffix=".tmp", dir=os.path.dirname(CONFIG_FILE))
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            if _read_config_file(CONFIG_FILE) is not None:
+                shutil.copyfile(CONFIG_FILE, CONFIG_BACKUP_FILE)
+            os.replace(tmp_path, CONFIG_FILE)
+            tmp_path = None
+        except Exception as e:
+            print(f"[WARN] Error saving config: {e}")
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+
+def remove_rule(config: dict, word: str) -> None:
+    """Delete a pronunciation rule; built-in rules are remembered so they stay deleted."""
+    config.get("pronunciation_dict", {}).pop(word, None)
+    if word in DEFAULT_PRONUNCIATION:
+        removed = config.setdefault("removed_default_rules", [])
+        if word not in removed:
+            removed.append(word)
+
+
+def set_rule(config: dict, word: str, spoken: str) -> None:
+    """Add or update a pronunciation rule (un-deleting a built-in rule if needed)."""
+    config.setdefault("pronunciation_dict", {})[word] = spoken
+    removed = config.get("removed_default_rules", [])
+    if word in removed:
+        removed.remove(word)
 
 
 def is_just_url(text: str) -> bool:

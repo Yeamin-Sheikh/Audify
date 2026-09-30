@@ -6,13 +6,13 @@ import os
 import re
 import threading
 
-import pyperclip
 import pystray
 from PIL import Image, ImageDraw
 from pystray import Menu
 from pystray import MenuItem as item
 
 from audify import __version__
+from audify.clipboard import get_clipboard_text
 from audify.config import (
     HISTORY_FILE,
     VOICES,
@@ -223,7 +223,7 @@ def setup_tray() -> None:
     def on_read_clipboard(icon: pystray.Icon, item_action: item) -> None:
         """Force-read whatever is currently on the clipboard."""
         daemon.last_spoken = ""  # Force re-read even if duplicate
-        text: str = pyperclip.paste()
+        text = get_clipboard_text()
         if text.strip():
             daemon.q.put(text)
 

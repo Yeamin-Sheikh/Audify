@@ -16,6 +16,8 @@ dist/
 Output/
 *.exe
 *.bak
+config.json.corrupt
+config.*.tmp
 
 # IDE / tools
 *.vbs

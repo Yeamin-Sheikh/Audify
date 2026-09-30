@@ -1,4 +1,4 @@
-# Audify v2.6.0
+# Audify v2.6.1
 
 A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices. Built to run invisibly in the System Tray.
 
@@ -15,15 +15,15 @@ A sleek, standalone Windows background AI Voice Daemon that reads your clipboard
 - **Zero-Gap Playback** — Seamless gapless chunk transitions using channel-queued audio (no silence between chunks).
 - **Reading Progress** — Tray tooltip shows "Reading (3/7)" during long reads so you know what's happening.
 - **Error Notifications** — Windows toast notifications when TTS fails (e.g., no internet).
-- **Auto-Retry** — Retries TTS generation up to 3 times on network failures with exponential backoff.
-- **Temp Cleanup** — Automatically removes temporary audio files after playback.
+- **Auto-Retry** — Retries TTS generation up to 3 times on network failures, and reports an error within seconds when you're offline.
+- **Streaming Playback** — Audio starts playing while it is still downloading, entirely in memory (no temporary files).
 - **Session History** — Logs everything read during the session; history is securely deleted on exit.
 
 ## Installation
 
 ### Installer (Recommended)
 
-1. Download **`Setup_Audify_2.6.0.exe`** from the [Releases](../../releases) page.
+1. Download **`Setup_Audify_2.6.1.exe`** from the [Releases](../../releases) page.
 2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
 3. Launch Audify. Look for the violet sound-wave icon in your System Tray.
 
@@ -85,7 +85,7 @@ Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces `Output\Setup_Audify_2.6.0.exe`.
+This produces `Output\Setup_Audify_2.6.1.exe`.
 
 ### Project Structure
 
@@ -106,6 +106,18 @@ config.json             # User settings (persisted between sessions)
 ```
 
 ## Changelog
+
+### v2.6.1
+
+- **Faster, Steadier Start** — Speech now plays while it is still downloading (streamed MP3 decoding via `miniaudio`), and the first chunk is one short sentence. First audio arrives in ~0.85–1.0s, and slow outliers of 3–10s are gone.
+- **No Temp Files** — Audio is decoded and played entirely in memory.
+- **Stop Really Stops** — `Ctrl+Alt+S` now stops the whole text; previously it only cut the current chunk and reading continued with the next one.
+- **Auto-Reading Fix** — After using "Read Clipboard Now" once, every later copy was read aloud as a number (a clipboard library overwrote a shared Win32 setting). Audify now uses only its own clipboard reader with private Win32 bindings.
+- **Clipboard Retry** — Copies are no longer missed when another app briefly holds the clipboard.
+- **Fail Fast Offline** — Errors are reported within ~1s instead of up to ~90s, and a new copy is never blocked by a stuck request.
+- **Crash-Safe Settings** — `config.json` is written atomically with a backup; a damaged file is restored from the backup instead of being reset to defaults.
+- **Deleted Rules Stay Deleted** — Built-in pronunciation rules you remove no longer come back on restart.
+- **Volume Fix** — Volume was applied twice (80% played at 64%); it is now applied once.
 
 ### v2.6.0
 

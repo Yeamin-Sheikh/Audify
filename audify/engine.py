@@ -8,19 +8,18 @@ import ctypes
 import os
 import queue
 import re
-import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from typing import Callable
 
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 import pygame
 import keyboard
 import pynput.mouse as pynput_mouse
-import edge_tts
 
 from audify.clipboard import ClipboardListener
+from audify.playback import SpeechSession
 from audify.config import (
     CONFIG_FILE,
     HISTORY_FILE,
@@ -36,6 +35,8 @@ try:
 except Exception:
     pass
 
+# Edge TTS delivers 24kHz mono audio; matching the mixer avoids any resampling
+pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
 pygame.mixer.init()
 
 class TTSDaemon:
@@ -69,6 +70,9 @@ class TTSDaemon:
         self.status: str = "Ready"
         self.is_speaking: bool = False
         self.on_state_change: Callable[[], None] | None = None
+
+        # Bumped by the stop hotkey; a session aborts when this no longer matches its start value
+        self._stop_generation: int = 0
 
         # Clear stale history from previous session
         if os.path.exists(HISTORY_FILE):
@@ -159,10 +163,17 @@ class TTSDaemon:
     # -- Playback controls -------------------------------------------------
 
     def stop_audio(self) -> None:
-        """Stop any currently-playing audio (global kill-switch callback)."""
+        """Stop reading entirely (global kill-switch callback).
+
+        Bumping the generation makes the worker abandon the rest of the text;
+        stopping the channel alone would only cut the current chunk.
+        """
+        self._stop_generation += 1
+        self._halt_channel()
+
+    def _halt_channel(self) -> None:
         try:
-            if self._tts_channel.get_busy():
-                self._tts_channel.stop()
+            self._tts_channel.stop()
         except Exception:
             pass
 
@@ -180,10 +191,10 @@ class TTSDaemon:
         except Exception:
             pass
 
-    def check_pause_and_wait(self) -> bool:
+    def check_pause_and_wait(self, stop_generation: int | None = None) -> bool:
         """
         Check if paused. If paused, sleep in a loop until unpaused or new text arrives.
-        Returns True if we should abort (e.g. new text arrived in queue).
+        Returns True if we should abort (new text arrived, or stop was pressed).
         """
         if not self.is_paused:
             return False
@@ -196,7 +207,8 @@ class TTSDaemon:
             pass
 
         while self.is_paused:
-            if not self.q.empty():
+            stopped = stop_generation is not None and stop_generation != self._stop_generation
+            if stopped or not self.q.empty():
                 # New text in queue, we must abort current playback
                 try:
                     self._tts_channel.stop()
@@ -249,19 +261,12 @@ class TTSDaemon:
 
     # -- TTS generation ----------------------------------------------------
 
-    async def _generate_audio(self, text: str, output_file: str) -> None:
-        """Call Edge TTS to synthesize speech and save to an mp3 file."""
-        voice: str = self.config.get("voice", "en-US-JennyNeural")
-        rate: str = self.config.get("rate", "+50%")
-        communicate = edge_tts.Communicate(text, voice, rate=rate)
-        await communicate.save(output_file)
-
-    def _split_text(self, text: str, first_chunk_max: int = 200) -> list[str]:
+    def _split_text(self, text: str, first_chunk_max: int = 100) -> list[str]:
         """
         Split text into natural paragraph and sentence-based chunks.
 
-        The FIRST chunk targets ~200 characters (1-2 sentences) so Edge TTS
-        can synthesize it fast and playback starts within ~1 second.
+        The FIRST chunk targets ~100 characters (about one sentence) so the
+        first request finishes quickly and later chunks are fetched sooner.
         All subsequent chunks use the normal ~800 character limit for
         efficient batch synthesis while the first chunk plays.
         """
@@ -324,13 +329,12 @@ class TTSDaemon:
 
         return chunks if chunks else [text]
 
-    def _generate_chunk(self, chunk_text: str) -> str | None:
-        """Generate audio for a single text chunk with retry, resolving code blocks live."""
+    def _resolve_code_blocks(self, chunk_text: str) -> str:
+        """Swap code-block placeholders back in, honouring the live skip setting."""
         with self._config_lock:
             skip_code = self.config.get("skip_code_blocks", True)
-            
+
         resolved_text = chunk_text
-        
         for idx, code_content in enumerate(self.current_code_blocks):
             placeholder = f"[[CODE_BLOCK_{idx}]]"
             if code_content.startswith("FENCED:"):
@@ -338,39 +342,20 @@ class TTSDaemon:
             else:
                 replacement = f" {code_content[7:]} "
             resolved_text = resolved_text.replace(placeholder, replacement)
+        return resolved_text
 
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
-        os.close(temp_fd)
-
-        last_error: str | None = None
-        for attempt in range(1, 4):
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._generate_audio(resolved_text, temp_path), 
-                    self._loop
-                )
-                future.result(timeout=30)
-                return temp_path
-            except asyncio.TimeoutError:
-                last_error = "TTS generation timed out (30s)"
-            except Exception as e:
-                last_error = str(e)
-            if attempt < 3:
-                time.sleep(0.5 * attempt)
-
-        error_msg = f"Chunk generation failed: {last_error}"
-        print(f"[ERROR] {error_msg}")
+    def _notify_error(self, message: str) -> None:
+        print(f"[ERROR] {message}")
         if self.tray_icon:
-            self.tray_icon.notify(error_msg, "Audify Error")
-        self._safe_remove(temp_path)
-        return None
+            try:
+                self.tray_icon.notify(message, "Audify Error")
+            except Exception:
+                pass
 
     # -- Worker thread -----------------------------------------------------
 
     def worker_loop(self) -> None:
-        """Main TTS worker -- pre-buffers remaining chunks concurrently using ThreadPoolExecutor."""
-        executor = ThreadPoolExecutor(max_workers=1)
-
+        """Main TTS worker: cleans each copied text and plays it through a streaming session."""
         while True:
             text: str | None = self.q.get()
 
@@ -379,18 +364,19 @@ class TTSDaemon:
                 text = self.q.get()
 
             if text is None:  # Exit signal
-                executor.shutdown(wait=False)
                 break
+
+            stop_generation = self._stop_generation
 
             if self.is_paused:
                 # Wait until unpaused or a new text is queued
-                if self.check_pause_and_wait():
+                if self.check_pause_and_wait(stop_generation):
                     continue
 
             # Clean the raw text (strip markdown, apply pronunciation dict)
             try:
                 with self._config_lock:
-                    dict_rules = self.config.get("pronunciation_dict", {})
+                    dict_rules = dict(self.config.get("pronunciation_dict", {}))
                 cleaned, code_blocks = markdown_to_text(
                     text,
                     pronunciation_dict=dict_rules,
@@ -408,106 +394,91 @@ class TTSDaemon:
                 continue
             self.last_spoken = cleaned
 
-            # Stop current playback
-            self.stop_audio()
-
-            # Log to history once for the full text
+            self._halt_channel()
             self.log_history(cleaned)
 
-            # Split into chunks for streamed playback
-            chunks = self._split_text(cleaned)
-            aborted = False
-            
-            temp_files = []
-
-            # First chunk is generated and played synchronously for <1s latency
-            first_path = self._generate_chunk(chunks[0])
-            if not first_path:
-                continue
-                
-            temp_files.append(first_path)
-
-            if not self.q.empty():
-                for f in temp_files:
-                    self._safe_remove(f)
-                continue
-
-            if self.is_paused:
-                if self.check_pause_and_wait():
-                    for f in temp_files:
-                        self._safe_remove(f)
-                    continue
-
-            self._set_status("Reading" if len(chunks) == 1 else f"Reading 1 of {len(chunks)}", speaking=True)
-            first_sound = pygame.mixer.Sound(first_path)
-            with self._config_lock:
-                vol = self.config.get("volume", 1.0)
-            first_sound.set_volume(vol)
-            self._tts_channel.play(first_sound)
-
-            # Concurrently pre-buffer remaining chunks
-            for i in range(1, len(chunks)):
-                if not self.q.empty():
-                    aborted = True
-                    break
-                if self.is_paused:
-                    if self.check_pause_and_wait():
-                        aborted = True
-                        break
-
-                # Submit next chunk generation to parallel thread
-                future = executor.submit(self._generate_chunk, chunks[i])
-
-                # Wait for current playback to finish/slot to open
-                while self._tts_channel.get_queue() is not None or self.is_paused:
-                    if not self.q.empty():
-                        aborted = True
-                        break
-                    if self.is_paused:
-                        if self.check_pause_and_wait():
-                            aborted = True
-                            break
-                    time.sleep(0.05)
-
-                if aborted:
-                    future.cancel()
-                    break
-
-                # Fetch pre-buffered chunk
-                try:
-                    next_path = future.result(timeout=35)
-                except Exception as e:
-                    print(f"[ERROR] Pre-buffer failed on chunk {i+1}: {e}")
-                    next_path = None
-
-                if not next_path:
-                    continue
-                    
-                temp_files.append(next_path)
-                
-                self._set_status(f"Reading {i+1} of {len(chunks)}", speaking=True)
-                next_sound = pygame.mixer.Sound(next_path)
-                with self._config_lock:
-                    vol = self.config.get("volume", 1.0)
-                next_sound.set_volume(vol)
-                self._tts_channel.queue(next_sound)
-                
-            # Wait for the remaining audio to finish
-            while self._tts_channel.get_busy():
-                if not self.q.empty() or self.is_paused and self.check_pause_and_wait():
-                    break
-                time.sleep(0.05)
-                
-            # Cleanup temp files
-            for f in temp_files:
-                self._safe_remove(f)
-                
+            try:
+                self._speak(self._split_text(cleaned), stop_generation)
+            except Exception as e:
+                print(f"[ERROR] Playback failed: {e}")
+                self._halt_channel()
             self._set_status("Ready")
 
+    def _speak(self, chunks: list[str], stop_generation: int) -> None:
+        """Play one text: start a streaming session and feed its audio to the channel gaplessly."""
+        with self._config_lock:
+            voice = self.config.get("voice", "en-US-JennyNeural")
+            rate = self.config.get("rate", "+50%")
+        frequency, _size, channels = pygame.mixer.get_init()
+
+        session = SpeechSession(
+            chunks, voice, rate, self._loop, (frequency, channels),
+            resolve_text=self._resolve_code_blocks,
+            on_error=self._notify_error,
+        )
+        session.start()
+
+        channel = self._tts_channel
+        ready: deque[list] = deque()  # [chunk_index, bytearray] not yet handed to the channel
+        playing: list[tuple[pygame.mixer.Sound, int]] = []  # sounds given to the channel, in order
+        shown_chunk = -1
+        decoded_all = False
+        start_cushion = int(frequency * channels * 2 * 0.1)  # one decoded block (0.1s) of 16-bit audio
+
+        def aborted() -> bool:
+            return not self.q.empty() or stop_generation != self._stop_generation
+
         try:
-            executor.shutdown(wait=False)
-        except Exception:
-            pass
+            while True:
+                if aborted():
+                    return
+                if self.is_paused and self.check_pause_and_wait(stop_generation):
+                    return
+
+                # Collect decoded audio; merge consecutive blocks of the same chunk
+                try:
+                    item = session.pcm.get(timeout=0.02)
+                except queue.Empty:
+                    item = False
+                if item is None:
+                    decoded_all = True
+                elif item:
+                    index, data = item
+                    if ready and ready[-1][0] == index:
+                        ready[-1][1] += data
+                    else:
+                        ready.append([index, bytearray(data)])
+
+                # Keep the channel's single queue slot filled for gapless playback.
+                # Starting from silence, wait for a small cushion so a slow network start doesn't stutter.
+                idle = not channel.get_busy()
+                cushioned = decoded_all or len(ready) > 1 or (ready and len(ready[0][1]) >= start_cushion)
+                if ready and ((idle and cushioned) or (not idle and channel.get_queue() is None)):
+                    index, data = ready.popleft()
+                    sound = pygame.mixer.Sound(buffer=bytes(data))
+                    if channel.get_busy():
+                        channel.queue(sound)
+                    else:
+                        channel.play(sound)
+                    playing.append((sound, index))
+
+                # Status follows what is audible, not what has been downloaded
+                current = channel.get_sound()
+                for sound, index in playing:
+                    if sound is current and index != shown_chunk:
+                        shown_chunk = index
+                        total = len(chunks)
+                        self._set_status("Reading" if total == 1 else f"Reading {index + 1} of {total}", speaking=True)
+                        break
+                if len(playing) > 8:
+                    del playing[:-4]
+
+                if decoded_all and not ready and not channel.get_busy():
+                    return
+        finally:
+            session.cancel()
+            if aborted():
+                self._halt_channel()
 
     # -- Clipboard monitor thread ------------------------------------------
 

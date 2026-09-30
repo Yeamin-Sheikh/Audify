@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from audify.engine import TTSDaemon
 
 from audify import __version__
-from audify.config import VOICES, RATES, save_config
+from audify.config import VOICES, RATES, remove_rule, save_config, set_rule
 from audify.gui.widgets import (
     FluentSlider,
     FluentToggle,
@@ -521,9 +521,12 @@ def _run_control_center(daemon: Any) -> None:
         status_label.config(text=text, fg=color)
         status_job[0] = root.after(2500, lambda: status_label.config(text=""))
 
+    # The reader thread copies the dictionary under this lock, so edits must hold it too
+    config_lock = getattr(daemon, "_config_lock", None) or threading.Lock()
+
     def persist() -> None:
-        daemon.config["pronunciation_dict"] = dict_ref
-        save_config(daemon.config)
+        with config_lock:
+            save_config(daemon.config)
 
     def clear_editor() -> None:
         word_var.set("")
@@ -540,7 +543,8 @@ def _run_control_center(daemon: Any) -> None:
             spoken_entry.focus_set()
         else:
             existed = w in dict_ref
-            dict_ref[w] = s
+            with config_lock:
+                set_rule(daemon.config, w, s)
             persist()
             refresh_tree(select=w)
             word_var.set("")
@@ -585,8 +589,9 @@ def _run_control_center(daemon: Any) -> None:
         words = [w for w in tree.selection() if w in dict_ref]
         if not words:
             return
-        for w in words:
-            del dict_ref[w]
+        with config_lock:
+            for w in words:
+                remove_rule(daemon.config, w)
         persist()
         refresh_tree()
         word_var.set("")
