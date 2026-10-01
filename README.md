@@ -95,7 +95,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer (recommended)
 
-1. Download **`Setup_Audify_2.8.1.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.8.2.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -181,7 +181,7 @@ build_exe.bat
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
 installer uses (it starts faster because nothing is unpacked at launch). The installer is written to
-`Output\Setup_Audify_2.8.1.exe`.
+`Output\Setup_Audify_2.8.2.exe`.
 
 Check that a build really works, including offline voices:
 
@@ -210,6 +210,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.8.2
+
+- **New app logo**: a faceted "A" with glowing, interwoven sound ribbons on a midnight-indigo tile. Small sizes (taskbar, title bar) use a simplified "A" that stays sharp.
 
 ### v2.8.1
 
