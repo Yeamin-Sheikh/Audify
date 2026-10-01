@@ -84,19 +84,18 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 | **Voices** | Jenny, Aria, Michelle, Ava, Jane, Ana, Christopher, Guy, Steffan, Brian, Andrew, Eric, Roger | Heart, Bella, Nicole, Sarah, Aoede, Kore, Emma 🇬🇧, Isabella 🇬🇧, Michael, Fenrir, Puck, George 🇬🇧, Fable 🇬🇧 |
 | **Needs internet** | Yes | No |
 | **Runs on** | Microsoft's servers | Your CPU (~25-35% while speaking) |
-| **Speeds** | 0.5x to 3.0x | 0.5x to 1.5x (faster speeds use the matching online voice) |
+| **Speeds** | 0.5x to 3.0x | 0.5x to 3.0x |
 | **Best for** | Fastest start, very high speeds | Privacy, offline use, natural tone |
 
 > [!TIP]
-> Offline voices stay clear up to 1.5x thanks to a hybrid speed-up: Kokoro speaks at up to 1.3x and a
-> pitch-preserving time-stretch handles the rest. In a speech-recognition test this cut misheard words
-> at 1.5x from 6.4% to 2.0% (Kokoro's own 2x speed: 14.9%).
+> Offline voices always speak at their natural 1x pace, and Audify then speeds the audio up or down
+> without changing the pitch. Words stay clearer than with Kokoro's own fast speech.
 
 ## Installation
 
 ### Installer (recommended)
 
-1. Download **`Setup_Audify_2.8.0.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.8.1.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -182,7 +181,7 @@ build_exe.bat
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
 installer uses (it starts faster because nothing is unpacked at launch). The installer is written to
-`Output\Setup_Audify_2.8.0.exe`.
+`Output\Setup_Audify_2.8.1.exe`.
 
 Check that a build really works, including offline voices:
 
@@ -197,7 +196,7 @@ audify/
 ├── __main__.py              Entry point, single-instance guard, --selftest
 ├── engine.py                Reader: clipboard queue, playback, speed/voice changes, fallback
 ├── playback.py              Streaming sessions: Edge MP3 decoding and Kokoro PCM, gapless
-├── kokoro_engine.py         Offline voices: lazy load, idle unload, hybrid speed, cancelling
+├── kokoro_engine.py         Offline voices: lazy load, idle unload, time-stretch speed, cancelling
 ├── clipboard.py             Event-driven Win32 clipboard listener
 ├── config.py                Settings, voices, speeds, crash-safe saving
 ├── pronunciation_library.py Built-in developer pronunciation library
@@ -212,9 +211,13 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.8.1
+
+- **Simpler offline speed**: offline voices now always speak at their natural 1x pace, and Audify speeds the audio up or down without changing the pitch. All speeds from 0.5x to 3x stay offline; if the PC is too busy to keep up, the busy-PC safety net still hands over to an online voice.
+
 ### v2.8.0
 
-- **Clearer offline voices**: a hybrid speed-up (Kokoro up to 1.3x plus a pitch-preserving time-stretch) keeps offline speech clear up to 1.5x. Faster speeds automatically use the matching online voice (American or British, female or male).
+- **Clearer offline voices**: a hybrid speed-up (Kokoro up to 1.3x plus a pitch-preserving time-stretch) kept offline speech clear up to 1.5x, with faster speeds read by the matching online voice (simplified in v2.8.1).
 - **Busy-PC safety net**: if offline speech starts falling behind because the PC is busy, the rest of the text continues with the matching online voice instead of stuttering. If the internet is also down, it stays offline.
 - **Change speed or voice mid-sentence**: the new setting is heard within about a second, resuming from the sentence you were on.
 - **~430 new pronunciations** (577 built in) covering Python, Windows, git/GitHub, AI/LLM, web, cloud, file extensions, units and everyday chat shorthand.

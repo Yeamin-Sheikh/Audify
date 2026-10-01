@@ -20,7 +20,6 @@ import pynput.mouse as pynput_mouse
 
 from audify.clipboard import ClipboardListener
 from audify.kokoro_engine import (
-    OFFLINE_SPEED_MAX,
     KokoroEngine,
     download_models,
     find_models,
@@ -47,7 +46,7 @@ pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
 pygame.mixer.init()
 
 def online_stand_in(kokoro_voice_id: str) -> str:
-    """Closest online voice for an offline one (used above the offline speed limit)."""
+    """Closest online voice for an offline one (used when the PC is too busy for offline speech)."""
     code = kokoro_voice_id[len(KOKORO_PREFIX):][:2]
     return {
         "af": "en-US-JennyNeural",
@@ -503,9 +502,6 @@ class TTSDaemon:
 
         offline = voice.startswith(KOKORO_PREFIX)
         if offline and force_online:
-            voice, offline = online_stand_in(voice), False
-        if offline and rate_to_speed(rate) > OFFLINE_SPEED_MAX:
-            # Offline voices blur when very fast; a matching online voice stays crisp
             voice, offline = online_stand_in(voice), False
         if offline and not self.kokoro.loaded and not find_models():
             # Model not downloaded yet: fetch it in the background, read this one online

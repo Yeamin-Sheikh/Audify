@@ -34,14 +34,10 @@ SAMPLE_RATE = 24000
 IDLE_UNLOAD_SECONDS = 60
 INFERENCE_THREADS = 3  # measured on a 4-core laptop: steadiest (>=1.05x real time at 2x) at ~35% CPU;
                        # 2 threads dipped below real time (gaps), 4 were no faster
+# Kokoro always speaks at its natural 1x pace (its own fast speech blurs
+# words); the chosen speed is then applied by a pitch-preserving time-stretch.
 MIN_SPEED = 0.5
-# Kokoro squeezes phonemes when asked to speak fast, which blurs words. Up to
-# MODEL_SPEED_MAX it stays clear; beyond that the audio is time-stretched
-# (pitch preserved) instead, up to OFFLINE_SPEED_MAX. Faster speeds are read by
-# an online voice (see engine), because stretching costs more CPU per second of
-# speech than a 4-core laptop can generate in real time.
-MODEL_SPEED_MAX = 1.3
-OFFLINE_SPEED_MAX = 1.5
+MAX_SPEED = 3.0
 
 
 def _app_dir() -> str:
@@ -137,18 +133,11 @@ def voice_language(voice: str) -> str:
 
 
 def clamp_speed(speed: float) -> float:
-    return max(MIN_SPEED, min(OFFLINE_SPEED_MAX, speed))
-
-
-def plan_speed(speed: float) -> tuple[float, float]:
-    """Split a target speed into (model speed, time-stretch factor)."""
-    target = clamp_speed(speed)
-    model_speed = min(target, MODEL_SPEED_MAX)
-    return model_speed, target / model_speed
+    return max(MIN_SPEED, min(MAX_SPEED, speed))
 
 
 def time_stretch(samples: Any, factor: float, sample_rate: int = SAMPLE_RATE) -> Any:
-    """Speed speech up by ``factor`` without changing pitch (WSOLA).
+    """Speed speech up (``factor`` > 1) or slow it down without changing pitch (WSOLA).
 
     Frames of 30ms are overlap-added at a fixed output hop while the input hop
     is ``factor`` times larger; each frame's exact start is nudged (+-5ms) to
@@ -157,7 +146,7 @@ def time_stretch(samples: Any, factor: float, sample_rate: int = SAMPLE_RATE) ->
     """
     import numpy as np
 
-    if factor <= 1.001 or len(samples) < sample_rate // 10:
+    if abs(factor - 1.0) < 0.001 or len(samples) < sample_rate // 10:
         return samples
     x = np.asarray(samples, dtype=np.float32)
     frame = int(sample_rate * 0.030)
@@ -266,8 +255,8 @@ class KokoroEngine:
     def synthesize(self, text: str, voice: str, speed: float, owner: object | None = None) -> Any:
         """Return float32 mono samples at 24kHz for ``text``, spoken at ``speed``.
 
-        Speeds above MODEL_SPEED_MAX are generated at that speed and then
-        time-stretched, which keeps words clearer than Kokoro's own fast speech.
+        The speech is generated at 1x and then time-stretched to ``speed``,
+        which keeps words clearer than Kokoro's own fast or slow speech.
 
         ``owner`` identifies the caller so ``cancel(owner)`` aborts only its own run.
         """
@@ -283,14 +272,11 @@ class KokoroEngine:
                 session.run_options = rt.RunOptions()
                 self._current_owner = owner
                 try:
-                    model_speed, stretch = plan_speed(speed)
-                    samples, _sr = kokoro.create(
-                        text, voice=voice, speed=model_speed, lang=voice_language(voice)
-                    )
+                    samples, _sr = kokoro.create(text, voice=voice, speed=1.0, lang=voice_language(voice))
                 finally:
                     self._current_owner = None
                     session.run_options = None
-            return time_stretch(samples, stretch)
+            return time_stretch(samples, clamp_speed(speed))
         finally:
             self._schedule_unload()
 
