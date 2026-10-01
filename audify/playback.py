@@ -115,6 +115,7 @@ class SpeechSession:
         self._resolve_text = resolve_text
         self._on_error = on_error
         self._feeds: list[queue.Queue[bytes | None]] = [queue.Queue() for _ in chunks]
+        self.failed = False  # set when online generation failed for any chunk
         self._kokoro = kokoro
         self._kokoro_voice = voice[len(KOKORO_PREFIX):] if voice.startswith(KOKORO_PREFIX) else None
 
@@ -146,6 +147,7 @@ class SpeechSession:
             # Unblock the decoder for any chunks we never reached
             for feed in self._feeds:
                 feed.put(None)
+        self.failed = bool(failed)
         if failed and not self.cancelled.is_set() and self._on_error:
             self._on_error(failed[-1])
 

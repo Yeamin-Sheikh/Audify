@@ -1,61 +1,157 @@
-# Audify v2.7.0
+<div align="center">
 
-A sleek, standalone Windows background AI Voice Daemon that reads your clipboard aloud using ultra-realistic Microsoft Neural voices online, or natural-sounding Kokoro voices that run offline on your PC. Built to run invisibly in the System Tray.
+<img src="docs/images/logo.png" alt="Audify logo" width="128" height="128">
+
+# Audify
+
+**Copy text. Hear it instantly.**
+
+A lightweight Windows tray app that reads your clipboard aloud with natural neural voices,
+online through Microsoft Edge or fully offline on your own PC.
+
+[![Latest release](https://img.shields.io/github/v/release/Yeamin-Sheikh/Audify?label=release&color=7c3aed)](https://github.com/Yeamin-Sheikh/Audify/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Yeamin-Sheikh/Audify/total?color=6366f1)](https://github.com/Yeamin-Sheikh/Audify/releases)
+![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+
+[**Download**](https://github.com/Yeamin-Sheikh/Audify/releases/latest) ·
+[Features](#features) ·
+[Voices](#voices) ·
+[Usage](#usage) ·
+[Build from source](#build-from-source) ·
+[Changelog](#changelog)
+
+</div>
+
+---
+
+## Why Audify?
+
+Reading long answers, docs and emails gets tiring. With Audify you **just press `Ctrl+C`** and it starts
+talking in about a second, without opening an app or clicking a button. It sits quietly in the system
+tray, understands Markdown and code, and knows how to say developer jargon properly
+(`__init__.py`, `GPT-4o`, `C#`, `k8s`, `TL;DR`...).
 
 ## Features
 
-- **Smart Auto-Reader** — Monitors your clipboard. Copy text with `Ctrl+C` or `Ctrl+X` and it reads it aloud instantly.
-- **Wispr Flow Proof** — Ignores programmatic clipboard changes so it won't read your own dictations back to you.
-- **Single Instance Guard** — Only one Audify can run at a time. Launching a second shows a friendly notification.
-- **Dynamic System Tray** — Left-click the tray icon to toggle pause/resume. The icon is a violet "A" monogram when ready, turns blue while speaking, and grey with a pause symbol when paused.
-- **Pronunciation Dictionary** — Map problem words to phonetic spellings (e.g., `GUI` -> `gooey`) via a built-in GUI editor.
-- **26 Voices & 8 Speeds** — 13 online Microsoft Neural voices plus 13 offline Kokoro voices (American and British). Switch voices and speed instantly from the tray menu.
-- **Offline Voices** — Kokoro runs entirely on your PC: free, private, and no internet needed. It loads only when an offline voice is used and unloads after 5 idle minutes, so Audify stays light.
-- **Global Kill-Switch** — Press `Ctrl + Alt + S` anywhere to stop playback immediately.
-- **Smart Code Handling** — Replaces code blocks with "[Skipped code block]" instead of reading raw syntax.
-- **Zero-Gap Playback** — Seamless gapless chunk transitions using channel-queued audio (no silence between chunks).
-- **Reading Progress** — Tray tooltip shows "Reading (3/7)" during long reads so you know what's happening.
-- **Error Notifications** — Windows toast notifications when TTS fails (e.g., no internet).
-- **Auto-Retry** — Retries TTS generation up to 3 times on network failures, and reports an error within seconds when you're offline.
-- **Streaming Playback** — Audio starts playing while it is still downloading, entirely in memory (no temporary files).
-- **Session History** — Logs everything read during the session; history is securely deleted on exit.
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🎧 Hands-free reading
+- **Copy to listen**: `Ctrl+C` / `Ctrl+X` text and it's read aloud right away.
+- **Streams as it speaks**: audio starts in **~1 second**, before the whole text is generated.
+- **Gapless playback**: long texts flow without pauses between sentences.
+- **Wispr Flow proof**: ignores clipboard changes you didn't make yourself.
+
+</td>
+<td width="50%" valign="top">
+
+### 🗣️ Voices that sound human
+- **26 voices**: 13 online Microsoft Neural voices plus 13 offline Kokoro voices.
+- **Works offline**: Kokoro runs on your PC with no internet and no account.
+- **8 speeds, changeable mid-sentence**: Audify picks up again from the sentence you're on.
+- **Busy-PC safety net**: if offline speech can't keep up, Audify hands over to an online voice instead of stuttering.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧠 Speaks developer
+- **~580 built-in pronunciations** for code, AI, cloud and Windows terms.
+- **Your own dictionary**: add, search and edit rules in the Control Center.
+- **Code aware**: skips fenced code blocks (optional) and reads inline code properly.
+- **Smart matching**: `IT` the acronym never touches the word "it".
+
+</td>
+<td width="50%" valign="top">
+
+### 🪶 Light and dependable
+- **~70 MB** of memory with online voices; the offline model unloads after a minute idle.
+- **Global stop hotkey** (`Ctrl+Alt+S`) stops everything instantly.
+- **Fails fast offline** and never misses a copy while another app holds the clipboard.
+- **Crash-safe settings** with automatic backup.
+
+</td>
+</tr>
+</table>
+
+## Voices
+
+| | Online (Microsoft Edge) | Offline (Kokoro) |
+|---|---|---|
+| **Voices** | Jenny, Aria, Michelle, Ava, Jane, Ana, Christopher, Guy, Steffan, Brian, Andrew, Eric, Roger | Heart, Bella, Nicole, Sarah, Aoede, Kore, Emma 🇬🇧, Isabella 🇬🇧, Michael, Fenrir, Puck, George 🇬🇧, Fable 🇬🇧 |
+| **Needs internet** | Yes | No |
+| **Runs on** | Microsoft's servers | Your CPU (~25-35% while speaking) |
+| **Speeds** | 0.5x to 3.0x | 0.5x to 1.5x (faster speeds use the matching online voice) |
+| **Best for** | Fastest start, very high speeds | Privacy, offline use, natural tone |
+
+> [!TIP]
+> Offline voices stay clear up to 1.5x thanks to a hybrid speed-up: Kokoro speaks at up to 1.3x and a
+> pitch-preserving time-stretch handles the rest. In a speech-recognition test this cut misheard words
+> at 1.5x from 6.4% to 2.0% (Kokoro's own 2x speed: 14.9%).
 
 ## Installation
 
-### Installer (Recommended)
+### Installer (recommended)
 
-1. Download **`Setup_Audify_2.7.0.exe`** from the [Releases](../../releases) page.
-2. Run the installer — it creates Start Menu and optional Desktop/Startup shortcuts.
-3. Launch Audify. Look for the violet "A" icon in your System Tray.
+1. Download **`Setup_Audify_2.8.0.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
+3. Look for the Audify icon in your system tray.
+
+The installer includes the offline voice model, so every voice works right away.
 
 ### Portable
 
-1. Download **`Audify.exe`** from the [Releases](../../releases) page.
-2. Place it anywhere and run. No installation needed.
-3. The first time you pick an offline voice, Audify downloads the voice model (~200 MB) once.
+Download **`Audify.exe`** and run it from anywhere. The first time you choose an offline voice, Audify
+downloads the voice model (~200 MB) once.
+
+> [!NOTE]
+> Windows SmartScreen may warn about an unrecognised app on first launch. Choose **More info → Run anyway**.
 
 ## Usage
 
-| Action | How |
-|---|---|
-| Read text | Copy it with `Ctrl+C` — Audify reads it automatically |
-| Pause / Resume | Left-click the tray icon |
-| Stop playback | `Ctrl + Alt + S` (global hotkey) |
-| Change voice | Right-click tray -> Voice |
-| Change speed | Right-click tray -> Speed |
-| Change volume | Right-click tray -> Volume |
-| Skip code blocks | Right-click tray -> Skip Code Blocks |
-| Edit pronunciations | Right-click tray -> Control Center... |
-| Force-read clipboard | Right-click tray -> Read Clipboard Now |
-| Re-read last text | Right-click tray -> Replay Last |
-| Exit | Right-click tray -> Quit Audify |
+<table align="center">
+  <tr>
+    <td align="center" width="140"><img src="docs/images/tray-ready.png" width="56" alt="Ready icon"><br><b>Ready</b></td>
+    <td align="center" width="140"><img src="docs/images/tray-speaking.png" width="56" alt="Speaking icon"><br><b>Speaking</b></td>
+    <td align="center" width="140"><img src="docs/images/tray-paused.png" width="56" alt="Paused icon"><br><b>Paused</b></td>
+  </tr>
+</table>
 
-## Developer Guide
+| To... | Do this |
+|---|---|
+| Read text aloud | Copy it with `Ctrl+C` |
+| Pause / resume | Left-click the tray icon |
+| Stop reading | `Ctrl+Alt+S` from anywhere |
+| Change voice | Tray → **Voice** → Online voices / Offline voices |
+| Change speed (works mid-sentence) | Tray → **Speed** |
+| Change volume | Tray → **Volume** |
+| Skip code blocks | Tray → **Skip Code Blocks** |
+| Edit pronunciations, voice, speed | Tray → **Control Center...** |
+| Read the clipboard again | Tray → **Read Clipboard Now** / **Replay Last** |
+| Quit | Tray → **Quit Audify** |
+
+### Control Center shortcuts
+
+| Key | Action |
+|---|---|
+| `Enter` | Save the rule being edited |
+| `Esc` | Clear the editor or search |
+| `Delete` | Remove the selected rules |
+| `Ctrl+F` | Search rules |
+| Double-click | Edit a rule |
+
+## Build from source
+
+<details>
+<summary><b>Developer guide</b></summary>
 
 ### Prerequisites
 
-- Python 3.11+
-- Windows 10/11
+- Windows 10/11, Python 3.11+
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) (only for the installer)
 
 ### Setup
 
@@ -65,59 +161,70 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Offline voices need the Kokoro model files in `models\` (the installer bundles them; from source they download on first use):
+Offline voices need the Kokoro model files in `models\` (from source they also download on first use):
 
 ```bash
 gh release download model-files-v1.0 --repo thewh1teagle/kokoro-onnx -D models -p "kokoro-v1.0.fp16.onnx" -p "voices-v1.0.bin"
 ```
 
-### Run from Source
+### Run
 
 ```bash
 python -m audify
 ```
 
-### Build Executable
+### Build
 
 ```bash
 build_exe.bat
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-This produces the portable `Audify.exe` in the project root and a folder build in `App\Audify\` that the installer uses (it starts faster because nothing is unpacked at launch).
+`build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
+installer uses (it starts faster because nothing is unpacked at launch). The installer is written to
+`Output\Setup_Audify_2.8.0.exe`.
 
-To check a build works (including offline voices), run `Audify.exe --selftest report.txt` and read the report.
-
-### Build Installer
-
-Requires [Inno Setup](https://jrsoftware.org/isinfo.php):
+Check that a build really works, including offline voices:
 
 ```bash
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+Audify.exe --selftest report.txt
 ```
 
-This produces `Output\Setup_Audify_2.7.0.exe`.
-
-### Project Structure
+### Project structure
 
 ```
 audify/
-  __init__.py           # Package version
-  __main__.py           # Entry point (single-instance guard)
-  config.py             # Config constants, load/save, pronunciation dictionary
-  engine.py             # TTSDaemon class (TTS pipeline, playback, clipboard)
-  playback.py           # Streaming speech sessions (Edge MP3 decode / Kokoro PCM -> gapless playback)
-  kokoro_engine.py      # Offline Kokoro voices: lazy load, idle unload, cancellable synthesis
-  clipboard.py          # Win32 event-driven clipboard listener
-  tray.py               # System tray icon and menu wiring
-  gui/
-    __init__.py
-    widgets.py           # FluentSlider, FluentToggle, custom Fluent controls
-    control_center.py    # Settings and pronunciation dictionary GUI
-clean_text.py           # Markdown-to-speech text sanitization
-config.json             # User settings (persisted between sessions)
+├── __main__.py              Entry point, single-instance guard, --selftest
+├── engine.py                Reader: clipboard queue, playback, speed/voice changes, fallback
+├── playback.py              Streaming sessions: Edge MP3 decoding and Kokoro PCM, gapless
+├── kokoro_engine.py         Offline voices: lazy load, idle unload, hybrid speed, cancelling
+├── clipboard.py             Event-driven Win32 clipboard listener
+├── config.py                Settings, voices, speeds, crash-safe saving
+├── pronunciation_library.py Built-in developer pronunciation library
+├── tray.py                  Tray icon and menu
+└── gui/
+    ├── control_center.py    Settings and pronunciation dictionary window
+    └── widgets.py           Fluent-style slider, toggle, entry and buttons
+clean_text.py                Markdown to speech text, pronunciation matching
 ```
 
+</details>
+
 ## Changelog
+
+### v2.8.0
+
+- **Clearer offline voices**: a hybrid speed-up (Kokoro up to 1.3x plus a pitch-preserving time-stretch) keeps offline speech clear up to 1.5x. Faster speeds automatically use the matching online voice (American or British, female or male).
+- **Busy-PC safety net**: if offline speech starts falling behind because the PC is busy, the rest of the text continues with the matching online voice instead of stuttering. If the internet is also down, it stays offline.
+- **Change speed or voice mid-sentence**: the new setting is heard within about a second, resuming from the sentence you were on.
+- **~430 new pronunciations** (577 built in) covering Python, Windows, git/GitHub, AI/LLM, web, cloud, file extensions, units and everyday chat shorthand.
+- **Smarter dictionary matching**: ALL-CAPS entries only match capitals ("IT" no longer changes "it"), all entries respect word boundaries (".ini" no longer hits ".initialize"), and longer entries win ("!==" before "!=").
+- **Code reads properly**: inline code now uses the dictionary too, and Python names like `__init__.py` are no longer mangled by Markdown.
+- **Lighter offline CPU use**: offline voices use 3 threads (about a third of a 4-core CPU while speaking), and the model unloads after 1 idle minute instead of 5.
+- **New README** with badges, a voice comparison and a feature overview.
+
+<details>
+<summary><b>Older releases</b></summary>
 
 ### v2.7.0
 
@@ -194,3 +301,5 @@ config.json             # User settings (persisted between sessions)
 ### v1.0.0
 
 - Initial release with Edge TTS integration, system tray, pronunciation dictionary, 13 voices, and 6 speed presets
+
+</details>

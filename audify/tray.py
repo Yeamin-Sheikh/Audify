@@ -21,6 +21,7 @@ from audify.config import (
     VOLUMES,
 )
 from audify.engine import TTSDaemon
+from audify.kokoro_engine import OFFLINE_SPEED_MAX
 from audify.playback import KOKORO_PREFIX, rate_to_speed
 from audify.gui.control_center import show_dictionary_ui
 
@@ -164,9 +165,9 @@ def _speed_display_name(daemon: TTSDaemon) -> str:
     for label, rate in RATES.items():
         if rate == current:
             name = label.split(" (")[0]
-            # Offline voices top out at 2x; say so instead of silently capping
-            if daemon.config.get("voice", "").startswith(KOKORO_PREFIX) and rate_to_speed(rate) > 2.0:
-                name += " (2x offline)"
+            # Above the offline limit an online voice reads instead; say so
+            if daemon.config.get("voice", "").startswith(KOKORO_PREFIX) and rate_to_speed(rate) > OFFLINE_SPEED_MAX:
+                name += " (online voice)"
             return name
     return "Custom"
 

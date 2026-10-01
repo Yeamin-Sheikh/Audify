@@ -181,6 +181,12 @@ DEFAULT_PRONUNCIATION: dict[str, str] = {
     "||": " or ",
 }
 
+# Extended developer library (~430 more terms), kept in its own module for readability
+from audify.pronunciation_library import LIBRARY as _LIBRARY  # noqa: E402
+
+for _word, _spoken in _LIBRARY.items():
+    DEFAULT_PRONUNCIATION.setdefault(_word, _spoken)
+
 DEFAULT_CONFIG: dict = {
     "voice": "en-US-JennyNeural",
     "rate": "+50%",

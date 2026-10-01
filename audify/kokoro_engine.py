@@ -3,8 +3,10 @@ Offline Kokoro TTS for Audify (kokoro-onnx on the CPU).
 
 Kept light on purpose:
   * nothing is imported or loaded until a Kokoro voice is actually used,
-  * the model is dropped again after a few idle minutes (~250-400MB freed),
-  * inference is limited to the physical cores so the PC stays responsive.
+  * the model is dropped again after a minute of idling (~300MB freed),
+  * inference uses 3 threads (about a third of a 4-core CPU while speaking).
+    Below-normal priority was tried and dropped: ordinary background load
+    starved it, delaying first audio by seconds.
 
 Model files are looked up next to the executable ("models" folder, shipped by
 the installer) and otherwise downloaded once to %LOCALAPPDATA%\\Audify\\models.
@@ -19,14 +21,27 @@ import threading
 import urllib.request
 from typing import Any, Callable
 
+# numpy's math library would otherwise start one idle thread per CPU on import
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 MODEL_FILE = "kokoro-v1.0.fp16.onnx"
 VOICES_FILE = "voices-v1.0.bin"
 DOWNLOAD_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 EXPECTED_SIZES = {MODEL_FILE: 177_464_787, VOICES_FILE: 28_214_398}
 
 SAMPLE_RATE = 24000
-IDLE_UNLOAD_SECONDS = 300
-MIN_SPEED, MAX_SPEED = 0.5, 2.0  # limits of the Kokoro model
+IDLE_UNLOAD_SECONDS = 60
+INFERENCE_THREADS = 3  # measured on a 4-core laptop: steadiest (>=1.05x real time at 2x) at ~35% CPU;
+                       # 2 threads dipped below real time (gaps), 4 were no faster
+MIN_SPEED = 0.5
+# Kokoro squeezes phonemes when asked to speak fast, which blurs words. Up to
+# MODEL_SPEED_MAX it stays clear; beyond that the audio is time-stretched
+# (pitch preserved) instead, up to OFFLINE_SPEED_MAX. Faster speeds are read by
+# an online voice (see engine), because stretching costs more CPU per second of
+# speech than a 4-core laptop can generate in real time.
+MODEL_SPEED_MAX = 1.3
+OFFLINE_SPEED_MAX = 1.5
 
 
 def _app_dir() -> str:
@@ -83,12 +98,13 @@ def _ends_with(word: str, marks: str) -> bool:
 
 
 def split_for_streaming(
-    text: str, first_words: int = 5, growth: float = 1.35, max_words: int = 40
+    text: str, first_words: int = 5, growth: float = 1.1, max_words: int = 40
 ) -> list[str]:
     """Split text into chunks that start tiny and grow, for gap-free offline streaming.
 
-    On a modest CPU Kokoro generates ~1.5x faster than real time, so each chunk
-    may only be ~1.4x longer than the one playing before it or playback would
+    On a modest (or busy) 4-core laptop CPU, offline speech at 1.5x is only a
+    little faster to generate than to play, so each chunk may only be ~1.1x
+    longer than the one playing before it or playback would
     catch up and stall. A tiny first chunk makes audio start quickly. Breaks
     prefer sentence ends, then clause ends, then fall back to word boundaries.
     """
@@ -121,7 +137,62 @@ def voice_language(voice: str) -> str:
 
 
 def clamp_speed(speed: float) -> float:
-    return max(MIN_SPEED, min(MAX_SPEED, speed))
+    return max(MIN_SPEED, min(OFFLINE_SPEED_MAX, speed))
+
+
+def plan_speed(speed: float) -> tuple[float, float]:
+    """Split a target speed into (model speed, time-stretch factor)."""
+    target = clamp_speed(speed)
+    model_speed = min(target, MODEL_SPEED_MAX)
+    return model_speed, target / model_speed
+
+
+def time_stretch(samples: Any, factor: float, sample_rate: int = SAMPLE_RATE) -> Any:
+    """Speed speech up by ``factor`` without changing pitch (WSOLA).
+
+    Frames of 30ms are overlap-added at a fixed output hop while the input hop
+    is ``factor`` times larger; each frame's exact start is nudged (+-5ms) to
+    the point that best continues the previous frame, which avoids the phasey
+    artefacts of naive overlap-add.
+    """
+    import numpy as np
+
+    if factor <= 1.001 or len(samples) < sample_rate // 10:
+        return samples
+    x = np.asarray(samples, dtype=np.float32)
+    frame = int(sample_rate * 0.030)
+    hop_out = frame // 2
+    hop_in = hop_out * factor
+    tolerance = int(sample_rate * 0.005)
+    window = np.hanning(frame).astype(np.float32)
+
+    x = np.concatenate([np.zeros(tolerance, np.float32), x, np.zeros(frame + tolerance, np.float32)])
+    n_frames = int((len(x) - frame - 2 * tolerance) / hop_in)
+    out = np.zeros(n_frames * hop_out + frame, np.float32)
+    norm = np.zeros_like(out)
+
+    previous = tolerance  # input position of the last frame used
+    for k in range(n_frames):
+        ideal = int(k * hop_in) + tolerance
+        if k == 0:
+            start = ideal
+        else:
+            # Natural continuation of the previous frame, matched within +-tolerance
+            target = x[previous + hop_out: previous + hop_out + frame]
+            region = x[ideal - tolerance: ideal + tolerance + frame]
+            if len(target) < frame or len(region) < frame:
+                break
+            scores = np.correlate(region, target, mode="valid")
+            start = ideal - tolerance + int(np.argmax(scores))
+        segment = x[start: start + frame]
+        if len(segment) < frame:
+            break
+        position = k * hop_out
+        out[position: position + frame] += segment * window
+        norm[position: position + frame] += window
+        previous = start
+    norm[norm < 1e-3] = 1.0
+    return out / norm
 
 
 class _CancellableSession:
@@ -180,7 +251,7 @@ class KokoroEngine:
             from kokoro_onnx import Kokoro
 
             options = rt.SessionOptions()
-            options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)  # physical cores
+            options.intra_op_num_threads = min(INFERENCE_THREADS, os.cpu_count() or 1)
             options.inter_op_num_threads = 1
             session = rt.InferenceSession(
                 os.path.join(folder, MODEL_FILE), options, providers=["CPUExecutionProvider"]
@@ -193,7 +264,10 @@ class KokoroEngine:
             return kokoro
 
     def synthesize(self, text: str, voice: str, speed: float, owner: object | None = None) -> Any:
-        """Return float32 mono samples at 24kHz for ``text``.
+        """Return float32 mono samples at 24kHz for ``text``, spoken at ``speed``.
+
+        Speeds above MODEL_SPEED_MAX are generated at that speed and then
+        time-stretched, which keeps words clearer than Kokoro's own fast speech.
 
         ``owner`` identifies the caller so ``cancel(owner)`` aborts only its own run.
         """
@@ -209,13 +283,14 @@ class KokoroEngine:
                 session.run_options = rt.RunOptions()
                 self._current_owner = owner
                 try:
+                    model_speed, stretch = plan_speed(speed)
                     samples, _sr = kokoro.create(
-                        text, voice=voice, speed=clamp_speed(speed), lang=voice_language(voice)
+                        text, voice=voice, speed=model_speed, lang=voice_language(voice)
                     )
                 finally:
                     self._current_owner = None
                     session.run_options = None
-            return samples
+            return time_stretch(samples, stretch)
         finally:
             self._schedule_unload()
 

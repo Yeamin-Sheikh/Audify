@@ -19,8 +19,14 @@ import keyboard
 import pynput.mouse as pynput_mouse
 
 from audify.clipboard import ClipboardListener
-from audify.kokoro_engine import KokoroEngine, find_models, download_models, split_for_streaming
-from audify.playback import KOKORO_PREFIX, SpeechSession
+from audify.kokoro_engine import (
+    OFFLINE_SPEED_MAX,
+    KokoroEngine,
+    download_models,
+    find_models,
+    split_for_streaming,
+)
+from audify.playback import KOKORO_PREFIX, SpeechSession, rate_to_speed
 from audify.config import (
     CONFIG_FILE,
     HISTORY_FILE,
@@ -28,7 +34,7 @@ from audify.config import (
     load_config,
     save_config,
 )
-from clean_text import markdown_to_text
+from clean_text import apply_pronunciations, markdown_to_text
 
 # DPI awareness for Windows
 try:
@@ -39,6 +45,21 @@ except Exception:
 # Edge TTS delivers 24kHz mono audio; matching the mixer avoids any resampling
 pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
 pygame.mixer.init()
+
+def online_stand_in(kokoro_voice_id: str) -> str:
+    """Closest online voice for an offline one (used above the offline speed limit)."""
+    code = kokoro_voice_id[len(KOKORO_PREFIX):][:2]
+    return {
+        "af": "en-US-JennyNeural",
+        "am": "en-US-GuyNeural",
+        "bf": "en-GB-SoniaNeural",
+        "bm": "en-GB-RyanNeural",
+    }.get(code, "en-US-JennyNeural")
+
+
+# Seconds of silence (waiting for offline audio) before switching to an online voice
+FALLBACK_AFTER_STALL_SECONDS = 0.6
+
 
 class TTSDaemon:
     """Background daemon that converts queued text to speech via Edge TTS."""
@@ -80,6 +101,11 @@ class TTSDaemon:
 
         # Bumped by the stop hotkey; a session aborts when this no longer matches its start value
         self._stop_generation: int = 0
+        # Bumped when voice or speed changes; a session then resumes the text with the new setting
+        self._restart_generation: int = 0
+        # Offline -> online fallback when the CPU is too busy for real-time offline speech
+        self._fallback_paused_until: float = 0.0
+        self._fallback_notified = False
 
         # Clear stale history from previous session
         if os.path.exists(HISTORY_FILE):
@@ -138,10 +164,13 @@ class TTSDaemon:
         self._save_timer.start()
 
     def set_voice(self, voice_id: str) -> None:
-        """Change the active TTS voice and persist to config."""
+        """Change the active TTS voice and persist to config (applies mid-speech too)."""
         with self._config_lock:
+            changed = self.config.get("voice") != voice_id
             self.config["voice"] = voice_id
             save_config(self.config)
+        if changed:
+            self._restart_generation += 1
         if voice_id.startswith(KOKORO_PREFIX):
             if find_models():
                 self.kokoro.preload_async()  # warm it so the first read is quick
@@ -150,10 +179,17 @@ class TTSDaemon:
         self._notify_state_change()
 
     def set_rate(self, rate_str: str) -> None:
-        """Change the speech rate and persist to config. Changes apply on next chunk playback."""
+        """Change the speech rate and persist to config.
+
+        Speed is baked into the generated audio, so while speaking the current
+        text is resumed from the sentence being heard at the new rate.
+        """
         with self._config_lock:
+            changed = self.config.get("rate") != rate_str
             self.config["rate"] = rate_str
             save_config(self.config)
+        if changed:
+            self._restart_generation += 1
         self._notify_state_change()
 
     def set_volume(self, vol: float) -> None:
@@ -345,14 +381,18 @@ class TTSDaemon:
         """Swap code-block placeholders back in, honouring the live skip setting."""
         with self._config_lock:
             skip_code = self.config.get("skip_code_blocks", True)
+            rules = dict(self.config.get("pronunciation_dict", {}))
 
         resolved_text = chunk_text
         for idx, code_content in enumerate(self.current_code_blocks):
             placeholder = f"[[CODE_BLOCK_{idx}]]"
+            if placeholder not in resolved_text:
+                continue
+            # Code is read with the dictionary too (`requirements.txt`, `__init__.py`, ...)
             if code_content.startswith("FENCED:"):
-                replacement = " [Skipped code block] " if skip_code else f" {code_content[7:]} "
+                replacement = " [Skipped code block] " if skip_code else f" {apply_pronunciations(code_content[7:], rules)} "
             else:
-                replacement = f" {code_content[7:]} "
+                replacement = f" {apply_pronunciations(code_content[7:], rules)} "
             resolved_text = resolved_text.replace(placeholder, replacement)
         return resolved_text
 
@@ -436,20 +476,37 @@ class TTSDaemon:
             self.log_history(cleaned)
 
             try:
-                self._speak(cleaned, stop_generation)
+                # A voice/speed change, or an offline voice falling behind, hands back
+                # the unread rest of the text to continue with the new settings
+                remaining: str | None = cleaned
+                force_online = False
+                while remaining:
+                    remaining, force_online = self._speak(remaining, stop_generation, force_online)
             except Exception as e:
                 print(f"[ERROR] Playback failed: {e}")
                 self._halt_channel()
             self._set_status("Ready")
 
-    def _speak(self, text: str, stop_generation: int) -> None:
-        """Play one text: start a streaming session and feed its audio to the channel gaplessly."""
+    def _speak(self, text: str, stop_generation: int, force_online: bool = False) -> tuple[str | None, bool]:
+        """Play one text: start a streaming session and feed its audio to the channel gaplessly.
+
+        Returns ``(unread_text, force_online)``. ``unread_text`` is set when reading
+        must continue with other settings (resuming from the start of the sentence
+        being heard): after a voice/speed change, or with ``force_online`` when an
+        offline voice could not keep up because the PC is busy.
+        """
+        restart_generation = self._restart_generation
         with self._config_lock:
             voice = self.config.get("voice", "en-US-JennyNeural")
             rate = self.config.get("rate", "+50%")
         frequency, _size, channels = pygame.mixer.get_init()
 
         offline = voice.startswith(KOKORO_PREFIX)
+        if offline and force_online:
+            voice, offline = online_stand_in(voice), False
+        if offline and rate_to_speed(rate) > OFFLINE_SPEED_MAX:
+            # Offline voices blur when very fast; a matching online voice stays crisp
+            voice, offline = online_stand_in(voice), False
         if offline and not self.kokoro.loaded and not find_models():
             # Model not downloaded yet: fetch it in the background, read this one online
             self._download_models_async()
@@ -469,17 +526,52 @@ class TTSDaemon:
         playing: list[tuple[pygame.mixer.Sound, int]] = []  # sounds given to the channel, in order
         shown_chunk = -1
         decoded_all = False
-        start_cushion = int(frequency * channels * 2 * 0.1)  # one decoded block (0.1s) of 16-bit audio
+        bytes_per_second = frequency * channels * 2
+        start_cushion = int(bytes_per_second * 0.1)  # one decoded block (0.1s) of 16-bit audio
+
+        # Playback position tracking, used to resume after a voice/speed change
+        chunk_bytes: dict[int, int] = {}
+        chunk_started: dict[int, tuple[float, float]] = {}  # index -> (start time, paused total then)
+        highest_chunk = -1
+        paused_total = 0.0
+        restarting = False
+        starved = 0.0  # seconds the channel sat silent waiting for offline audio
+        last_tick = time.perf_counter()
 
         def aborted() -> bool:
             return not self.q.empty() or stop_generation != self._stop_generation
 
+        def unread_text() -> str:
+            """Text from the start of the sentence being heard to the end."""
+            if shown_chunk < 0:
+                return "\n\n".join(chunks)
+            current_text = chunks[shown_chunk]
+            started, paused_then = chunk_started[shown_chunk]
+            heard = time.perf_counter() - started - (paused_total - paused_then)
+            if decoded_all or highest_chunk > shown_chunk:
+                duration = chunk_bytes.get(shown_chunk, 0) / bytes_per_second
+            else:  # still arriving: estimate from length (~15 characters/second at 1x)
+                duration = len(current_text) / (15.0 * rate_to_speed(rate))
+            fraction = min(1.0, max(0.0, heard / duration)) if duration > 0 else 0.0
+            position = int(fraction * len(current_text))
+            sentence_start = max(current_text.rfind(mark, 0, position) for mark in (". ", "! ", "? ", "\n"))
+            rest = [current_text[sentence_start + 1:].strip() if sentence_start >= 0 else current_text]
+            rest += chunks[shown_chunk + 1:]
+            return "\n\n".join(part for part in rest if part)
+
         try:
             while True:
                 if aborted():
-                    return
-                if self.is_paused and self.check_pause_and_wait(stop_generation):
-                    return
+                    return None, False
+                if restart_generation != self._restart_generation:
+                    restarting = True
+                    return unread_text(), False
+                if self.is_paused:
+                    pause_began = time.perf_counter()
+                    if self.check_pause_and_wait(stop_generation):
+                        return None, False
+                    paused_total += time.perf_counter() - pause_began
+                    continue  # re-check for a voice/speed change made while paused
 
                 # Collect decoded audio; merge consecutive blocks of the same chunk
                 try:
@@ -490,6 +582,8 @@ class TTSDaemon:
                     decoded_all = True
                 elif item:
                     index, data = item
+                    chunk_bytes[index] = chunk_bytes.get(index, 0) + len(data)
+                    highest_chunk = max(highest_chunk, index)
                     if ready and ready[-1][0] == index:
                         ready[-1][1] += data
                     else:
@@ -513,17 +607,34 @@ class TTSDaemon:
                 for sound, index in playing:
                     if sound is current and index != shown_chunk:
                         shown_chunk = index
+                        chunk_started[index] = (time.perf_counter(), paused_total)
                         total = len(chunks)
                         self._set_status("Reading" if total == 1 else f"Reading {index + 1} of {total}", speaking=True)
                         break
                 if len(playing) > 8:
                     del playing[:-4]
 
+                # Offline voice falling behind (busy CPU): hand the rest to an online voice
+                now = time.perf_counter()
+                if offline and shown_chunk >= 0 and not decoded_all and not ready and not channel.get_busy():
+                    starved += now - last_tick
+                    if starved > FALLBACK_AFTER_STALL_SECONDS and now >= self._fallback_paused_until:
+                        restarting = True
+                        if not self._fallback_notified:
+                            self._fallback_notified = True
+                            self._notify_info("Your PC is busy, so Audify switched to an online voice to avoid pauses.")
+                        return unread_text(), True
+                last_tick = now
+
                 if decoded_all and not ready and not channel.get_busy():
-                    return
+                    if force_online and not playing and session.failed:
+                        # Online fallback failed too (no internet?): back to offline, don't retry for a while
+                        self._fallback_paused_until = time.perf_counter() + 300
+                        return text, False
+                    return None, False
         finally:
             session.cancel()
-            if aborted():
+            if restarting or aborted():
                 self._halt_channel()
 
     # -- Clipboard monitor thread ------------------------------------------
