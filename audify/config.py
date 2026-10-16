@@ -201,32 +201,22 @@ DEFAULT_CONFIG: dict = {
 # -- Speech option definitions (Global Scope for Unified Access) -----------
 VOICES: dict[str, str] = {
     "Jenny (Natural Female)": "en-US-JennyNeural",
+    "Emma (Multilingual Female)": "en-US-EmmaMultilingualNeural",
+    "Ava (Multilingual Female)": "en-US-AvaMultilingualNeural",
     "Aria (Standard Female)": "en-US-AriaNeural",
     "Michelle (Expressive Female)": "en-US-MichelleNeural",
-    "Ava (Multilingual Female)": "en-US-AvaMultilingualNeural",
-    "Jane (Expressive Female)": "en-US-JaneNeural",
     "Ana (Child Female)": "en-US-AnaNeural",
+    "Sonia (British Female)": "en-GB-SoniaNeural",
+    "Libby (British Female)": "en-GB-LibbyNeural",
+    "Andrew (Multilingual Male)": "en-US-AndrewMultilingualNeural",
+    "Brian (Multilingual Male)": "en-US-BrianMultilingualNeural",
     "Christopher (Natural Male)": "en-US-ChristopherNeural",
     "Guy (Standard Male)": "en-US-GuyNeural",
     "Steffan (Expressive Male)": "en-US-SteffanNeural",
-    "Brian (Multilingual Male)": "en-US-BrianMultilingualNeural",
-    "Andrew (Multilingual Male)": "en-US-AndrewMultilingualNeural",
     "Eric (Natural Male)": "en-US-EricNeural",
     "Roger (Natural Male)": "en-US-RogerNeural",
-    # Offline Kokoro voices (run on this PC; best-rated English voices first)
-    "Heart (Offline American Female)": "kokoro:af_heart",
-    "Bella (Offline American Female)": "kokoro:af_bella",
-    "Nicole (Offline American Female)": "kokoro:af_nicole",
-    "Sarah (Offline American Female)": "kokoro:af_sarah",
-    "Aoede (Offline American Female)": "kokoro:af_aoede",
-    "Kore (Offline American Female)": "kokoro:af_kore",
-    "Emma (Offline British Female)": "kokoro:bf_emma",
-    "Isabella (Offline British Female)": "kokoro:bf_isabella",
-    "Michael (Offline American Male)": "kokoro:am_michael",
-    "Fenrir (Offline American Male)": "kokoro:am_fenrir",
-    "Puck (Offline American Male)": "kokoro:am_puck",
-    "George (Offline British Male)": "kokoro:bm_george",
-    "Fable (Offline British Male)": "kokoro:bm_fable",
+    "Ryan (British Male)": "en-GB-RyanNeural",
+    "Thomas (British Male)": "en-GB-ThomasNeural",
 }
 
 RATES: dict[str, str] = {
@@ -292,10 +282,21 @@ def load_config() -> dict:
     if loaded:
         config.update(loaded)
 
+    # Ensure saved voice is still a valid online Microsoft Neural voice
+    valid_voices = set(VOICES.values())
+    if config.get("voice") not in valid_voices:
+        config["voice"] = DEFAULT_CONFIG["voice"]
+        changed_voice = True
+    else:
+        changed_voice = False
+
     # Auto-merge built-in rules the user hasn't got yet, skipping ones they deleted
     user_dict = config.setdefault("pronunciation_dict", {})
     removed = set(config.setdefault("removed_default_rules", []))
-    changed = not loaded_from_main  # rewrite config.json if it was missing or restored
+    changed = (not loaded_from_main) or changed_voice
+    if user_dict.get("HTTP") == "H T M L":
+        user_dict["HTTP"] = "H T T P"
+        changed = True
     for k, v in DEFAULT_PRONUNCIATION.items():
         if k not in user_dict and k not in removed:
             user_dict[k] = v

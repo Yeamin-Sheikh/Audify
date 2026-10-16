@@ -19,13 +19,8 @@ import keyboard
 import pynput.mouse as pynput_mouse
 
 from audify.clipboard import ClipboardListener
-from audify.kokoro_engine import (
-    KokoroEngine,
-    download_models,
-    find_models,
-    split_for_streaming,
-)
-from audify.playback import KOKORO_PREFIX, SpeechSession, rate_to_speed
+from audify.playback import SpeechSession, prewarm_edge_tts, rate_to_speed
+from audify.updater import start_weekly_update_checker
 from audify.config import (
     CONFIG_FILE,
     HISTORY_FILE,
@@ -44,20 +39,6 @@ except Exception:
 # Edge TTS delivers 24kHz mono audio; matching the mixer avoids any resampling
 pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
 pygame.mixer.init()
-
-def online_stand_in(kokoro_voice_id: str) -> str:
-    """Closest online voice for an offline one (used when the PC is too busy for offline speech)."""
-    code = kokoro_voice_id[len(KOKORO_PREFIX):][:2]
-    return {
-        "af": "en-US-JennyNeural",
-        "am": "en-US-GuyNeural",
-        "bf": "en-GB-SoniaNeural",
-        "bm": "en-GB-RyanNeural",
-    }.get(code, "en-US-JennyNeural")
-
-
-# Seconds of silence (waiting for offline audio) before switching to an online voice
-FALLBACK_AFTER_STALL_SECONDS = 0.6
 
 
 class TTSDaemon:
@@ -79,17 +60,14 @@ class TTSDaemon:
 
         # Persistent event loop for TTS
         self._loop = asyncio.new_event_loop()
-        threading.Thread(target=self._start_loop, daemon=True).start()
+        threading.Thread(target=self._start_loop, daemon=True, name="tts-event-loop").start()
+
+        # Pre-warm Sec-MS-GEC v2 token, shared TCPConnector, and DNS cache
+        prewarm_edge_tts(self._loop)
 
         # Event-driven clipboard listener
         self._clip_listener = ClipboardListener(self._on_clipboard_change)
 
-        # Offline voices: loaded on first use (or warmed now if one is selected)
-        self.kokoro = KokoroEngine(notify=self._notify_info)
-        self._model_download_lock = threading.Lock()
-        if self.config.get("voice", "").startswith(KOKORO_PREFIX) and find_models():
-            self.kokoro.preload_async()
-        
         # Tray icon (injected later)
         self.tray_icon = None
 
@@ -102,9 +80,6 @@ class TTSDaemon:
         self._stop_generation: int = 0
         # Bumped when voice or speed changes; a session then resumes the text with the new setting
         self._restart_generation: int = 0
-        # Offline -> online fallback when the CPU is too busy for real-time offline speech
-        self._fallback_paused_until: float = 0.0
-        self._fallback_notified = False
 
         # Clear stale history from previous session
         if os.path.exists(HISTORY_FILE):
@@ -123,9 +98,12 @@ class TTSDaemon:
             keyboard.add_hotkey(
                 self.config.get("stop_hotkey", "ctrl+alt+s"), self.stop_audio
             )
-            # Hooks for Ctrl+C / Ctrl+X to detect manual copying
-            keyboard.add_hotkey("ctrl+c", self.mark_manual_copy)
-            keyboard.add_hotkey("ctrl+x", self.mark_manual_copy)
+            # Hooks for standard and terminal copy shortcuts to detect manual copying
+            for copy_hotkey in ("ctrl+c", "ctrl+x", "ctrl+shift+c", "ctrl+insert"):
+                try:
+                    keyboard.add_hotkey(copy_hotkey, self.mark_manual_copy)
+                except Exception:
+                    pass
 
             # Mouse hook to detect Right-Click -> Copy
             self.mouse_listener = pynput_mouse.Listener(on_click=self.on_mouse_click)
@@ -133,7 +111,10 @@ class TTSDaemon:
         except Exception as e:
             print(f"[WARN] Failed to bind hotkey: {e}")
 
-    def _start_loop(self):
+        # Start periodic weekly check for edge-tts updates on PyPI
+        start_weekly_update_checker(self)
+
+    def _start_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
@@ -147,11 +128,11 @@ class TTSDaemon:
             self.last_ctrl_c_time = time.time()
 
     def mark_manual_copy(self) -> None:
-        """Record that the user manually pressed Ctrl+C / Ctrl+X."""
+        """Record that the user manually triggered a copy shortcut."""
         self.last_ctrl_c_time = time.time()
 
     # -- Controls ----------------------------------------------------------
-    
+
     def _do_save(self) -> None:
         with self._config_lock:
             save_config(self.config)
@@ -170,11 +151,6 @@ class TTSDaemon:
             save_config(self.config)
         if changed:
             self._restart_generation += 1
-        if voice_id.startswith(KOKORO_PREFIX):
-            if find_models():
-                self.kokoro.preload_async()  # warm it so the first read is quick
-            else:
-                self._download_models_async()
         self._notify_state_change()
 
     def set_rate(self, rate_str: str) -> None:
@@ -282,7 +258,7 @@ class TTSDaemon:
                 pass
 
     # -- Tray Updates ------------------------------------------------------
-    
+
     def _set_status(self, status: str, speaking: bool = False) -> None:
         """Record the playback status and let the tray redraw its icon, tooltip and menu."""
         self.status = status
@@ -308,14 +284,14 @@ class TTSDaemon:
 
     # -- TTS generation ----------------------------------------------------
 
-    def _split_text(self, text: str, first_chunk_max: int = 100) -> list[str]:
+    def _split_text(self, text: str, first_chunk_max: int = 80) -> list[str]:
         """
         Split text into natural paragraph and sentence-based chunks.
 
-        The FIRST chunk targets ~100 characters (about one sentence) so the
-        first request finishes quickly and later chunks are fetched sooner.
-        All subsequent chunks use the normal ~800 character limit for
-        efficient batch synthesis while the first chunk plays.
+        The FIRST chunk targets ~80 characters (about one short sentence) so the
+        first Edge TTS request finishes with minimal latency and audio playback
+        starts in well under a second. All subsequent chunks use an ~800 character
+        limit and are prefetched concurrently while the first chunk plays.
         """
         chunk_limit = first_chunk_max  # starts small, switches to 800 after first chunk
 
@@ -329,20 +305,20 @@ class TTSDaemon:
             para = para.strip()
             if not para:
                 continue
-                
+
             # If paragraph itself fits in the remaining space of current chunk, add it whole
             if current_len + len(para) <= chunk_limit:
                 current_chunk.append(para)
                 current_len += len(para) + 2  # +2 for double newline
                 continue
-                
+
             # Otherwise, split paragraph into sentences
             sentences = re.split(r"(?<=[.!?])\s+", para)
             for sentence in sentences:
                 sentence = sentence.strip()
                 if not sentence:
                     continue
-                    
+
                 # If a single sentence is exceptionally long (>1000 chars), split by clauses (commas, semicolons)
                 if len(sentence) > 1000:
                     clauses = re.split(r"(?<=[,;])\s+", sentence)
@@ -403,24 +379,6 @@ class TTSDaemon:
             except Exception:
                 pass
 
-    def _download_models_async(self) -> None:
-        """Fetch the offline voice model once, in the background."""
-        if not self._model_download_lock.acquire(blocking=False):
-            return  # already downloading
-
-        def run() -> None:
-            try:
-                self._notify_info("Downloading offline voices (about 200 MB). Using an online voice until it's done.")
-                download_models()
-                self._notify_info("Offline voices are ready.")
-                self.kokoro.preload_async()
-            except Exception as e:
-                self._notify_error(f"Could not download offline voices: {e}")
-            finally:
-                self._model_download_lock.release()
-
-        threading.Thread(target=run, daemon=True, name="kokoro-download").start()
-
     def _notify_error(self, message: str) -> None:
         print(f"[ERROR] {message}")
         if self.tray_icon:
@@ -475,24 +433,22 @@ class TTSDaemon:
             self.log_history(cleaned)
 
             try:
-                # A voice/speed change, or an offline voice falling behind, hands back
-                # the unread rest of the text to continue with the new settings
+                # A mid-speech voice or speed change hands back the unread rest
+                # of the text to continue from the current sentence
                 remaining: str | None = cleaned
-                force_online = False
                 while remaining:
-                    remaining, force_online = self._speak(remaining, stop_generation, force_online)
+                    remaining = self._speak(remaining, stop_generation)
             except Exception as e:
                 print(f"[ERROR] Playback failed: {e}")
                 self._halt_channel()
             self._set_status("Ready")
 
-    def _speak(self, text: str, stop_generation: int, force_online: bool = False) -> tuple[str | None, bool]:
+    def _speak(self, text: str, stop_generation: int) -> str | None:
         """Play one text: start a streaming session and feed its audio to the channel gaplessly.
 
-        Returns ``(unread_text, force_online)``. ``unread_text`` is set when reading
-        must continue with other settings (resuming from the start of the sentence
-        being heard): after a voice/speed change, or with ``force_online`` when an
-        offline voice could not keep up because the PC is busy.
+        Returns ``unread_text`` when reading must continue with new settings
+        (resuming from the start of the sentence being heard after a voice/speed
+        change), or ``None`` when playback finishes or is stopped.
         """
         restart_generation = self._restart_generation
         with self._config_lock:
@@ -500,20 +456,12 @@ class TTSDaemon:
             rate = self.config.get("rate", "+50%")
         frequency, _size, channels = pygame.mixer.get_init()
 
-        offline = voice.startswith(KOKORO_PREFIX)
-        if offline and force_online:
-            voice, offline = online_stand_in(voice), False
-        if offline and not self.kokoro.loaded and not find_models():
-            # Model not downloaded yet: fetch it in the background, read this one online
-            self._download_models_async()
-            voice, offline = "en-US-JennyNeural", False
-        chunks = split_for_streaming(text) if offline else self._split_text(text)
+        chunks = self._split_text(text)
 
         session = SpeechSession(
             chunks, voice, rate, self._loop, (frequency, channels),
             resolve_text=self._resolve_code_blocks,
             on_error=self._notify_error,
-            kokoro=self.kokoro,
         )
         session.start()
 
@@ -523,7 +471,7 @@ class TTSDaemon:
         shown_chunk = -1
         decoded_all = False
         bytes_per_second = frequency * channels * 2
-        start_cushion = int(bytes_per_second * 0.1)  # one decoded block (0.1s) of 16-bit audio
+        start_cushion = int(bytes_per_second * 0.05)  # one 50ms decoded block of 16-bit audio
 
         # Playback position tracking, used to resume after a voice/speed change
         chunk_bytes: dict[int, int] = {}
@@ -531,8 +479,6 @@ class TTSDaemon:
         highest_chunk = -1
         paused_total = 0.0
         restarting = False
-        starved = 0.0  # seconds the channel sat silent waiting for offline audio
-        last_tick = time.perf_counter()
 
         def aborted() -> bool:
             return not self.q.empty() or stop_generation != self._stop_generation
@@ -558,20 +504,20 @@ class TTSDaemon:
         try:
             while True:
                 if aborted():
-                    return None, False
+                    return None
                 if restart_generation != self._restart_generation:
                     restarting = True
-                    return unread_text(), False
+                    return unread_text()
                 if self.is_paused:
                     pause_began = time.perf_counter()
                     if self.check_pause_and_wait(stop_generation):
-                        return None, False
+                        return None
                     paused_total += time.perf_counter() - pause_began
                     continue  # re-check for a voice/speed change made while paused
 
                 # Collect decoded audio; merge consecutive blocks of the same chunk
                 try:
-                    item = session.pcm.get(timeout=0.02)
+                    item = session.pcm.get(timeout=0.015)
                 except queue.Empty:
                     item = False
                 if item is None:
@@ -586,7 +532,7 @@ class TTSDaemon:
                         ready.append([index, bytearray(data)])
 
                 # Keep the channel's single queue slot filled for gapless playback.
-                # Starting from silence, wait for a small cushion so a slow network start doesn't stutter.
+                # Starting from silence, wait for a 50ms cushion so playback never stutters.
                 idle = not channel.get_busy()
                 cushioned = decoded_all or len(ready) > 1 or (ready and len(ready[0][1]) >= start_cushion)
                 if ready and ((idle and cushioned) or (not idle and channel.get_queue() is None)):
@@ -610,24 +556,8 @@ class TTSDaemon:
                 if len(playing) > 8:
                     del playing[:-4]
 
-                # Offline voice falling behind (busy CPU): hand the rest to an online voice
-                now = time.perf_counter()
-                if offline and shown_chunk >= 0 and not decoded_all and not ready and not channel.get_busy():
-                    starved += now - last_tick
-                    if starved > FALLBACK_AFTER_STALL_SECONDS and now >= self._fallback_paused_until:
-                        restarting = True
-                        if not self._fallback_notified:
-                            self._fallback_notified = True
-                            self._notify_info("Your PC is busy, so Audify switched to an online voice to avoid pauses.")
-                        return unread_text(), True
-                last_tick = now
-
                 if decoded_all and not ready and not channel.get_busy():
-                    if force_online and not playing and session.failed:
-                        # Online fallback failed too (no internet?): back to offline, don't retry for a while
-                        self._fallback_paused_until = time.perf_counter() + 300
-                        return text, False
-                    return None, False
+                    return None
         finally:
             session.cancel()
             if restarting or aborted():
@@ -659,4 +589,3 @@ class TTSDaemon:
                 self.q.put(text)
 
         threading.Timer(0.03, _retry).start()
-

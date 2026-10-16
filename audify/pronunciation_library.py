@@ -3,7 +3,7 @@ Extended built-in pronunciation library for Audify.
 
 Merged into DEFAULT_PRONUNCIATION (config.py). Focus: the words a developer
 working with Python, Windows, git/GitHub, AI/LLM tooling and web stacks reads
-every day, where TTS engines (especially offline Kokoro) guess wrong.
+every day, where TTS engines guess wrong.
 
 Matching rules (see clean_text.apply_pronunciations):
   * ALL-CAPS keys match only in capitals, so acronyms never hijack plain words.

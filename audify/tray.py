@@ -21,7 +21,6 @@ from audify.config import (
     VOLUMES,
 )
 from audify.engine import TTSDaemon
-from audify.playback import KOKORO_PREFIX
 from audify.gui.control_center import show_dictionary_ui
 
 
@@ -141,11 +140,10 @@ def _voice_gender(label: str) -> str:
 
 
 def _short_voice_label(label: str) -> str:
-    """"Heart (Offline American Female)" -> "Heart (American)".
+    """"Jenny (Natural Female)" -> "Jenny (Natural)".
 
-    The gender moves to a group header and "Offline" to the submenu name.
+    The gender moves to a group header in the Voice menu.
     """
-    label = label.replace("(Offline ", "(")
     return re.sub(r"\s*\b(Female|Male)\)", ")", label).replace(" ()", "")
 
 
@@ -288,27 +286,7 @@ def setup_tray() -> None:
             )
         return items
 
-    def is_offline(v_id: str) -> bool:
-        return v_id.startswith(KOKORO_PREFIX)
-
-    online_voices = [(l, v) for l, v in VOICES.items() if not is_offline(v)]
-    offline_voices = [(l, v) for l, v in VOICES.items() if is_offline(v)]
-
-    # Voice > Online voices / Offline voices, each marked when it holds the current voice
-    voice_menu_items = [
-        item(
-            "Online voices (Microsoft)",
-            Menu(*voice_group_items(online_voices)),
-            checked=lambda i: not is_offline(daemon.config.get("voice", "")),
-            radio=True,
-        ),
-        item(
-            "Offline voices (Kokoro)",
-            Menu(*voice_group_items(offline_voices)),
-            checked=lambda i: is_offline(daemon.config.get("voice", "")),
-            radio=True,
-        ),
-    ]
+    voice_menu_items = voice_group_items(list(VOICES.items()))
 
     rate_menu_items = [
         item(

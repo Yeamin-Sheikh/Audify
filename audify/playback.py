@@ -1,15 +1,22 @@
 """
-Streaming speech pipeline for Audify.
+Low-latency streaming speech pipeline for Audify.
 
 Edge TTS audio is decoded and played while it is still downloading, instead
 of waiting for a finished MP3 file:
 
-    producer (asyncio loop)   decoder thread            player (worker thread)
-    Edge TTS websocket  --->  miniaudio MP3 -> PCM  --->  pygame channel queue
-         MP3 bytes                 PCM blocks               gapless playback
+    producer (asyncio loop)      decoder thread            player (worker thread)
+    Edge TTS websocket     --->  miniaudio MP3 -> PCM  --->  pygame channel queue
+         MP3 bytes                    PCM blocks               gapless playback
 
-Offline Kokoro voices skip the network and the decoder: a producer thread
-synthesizes PCM directly and hands it to the same player.
+Response-time optimizations:
+  * A persistent _ReusableTCPConnector caches DNS lookups (speech.platform.bing.com)
+    and reuses SSL state across chunks and across clipboard copies, avoiding a cold
+    DNS + SSL context setup on every chunk.
+  * Startup pre-warming computes and caches the Sec-MS-GEC v2 token (5-minute LRU
+    window in edge-tts 7.3.1+) and warms the DNS cache before the first Ctrl+C.
+  * Multi-chunk sessions pipeline up to 2 chunks concurrently via asyncio.Semaphore(2),
+    so chunk N+1 finishes its WebSocket handshake and buffers audio while chunk N plays.
+  * 50ms decode blocks (DECODE_BLOCK_SECONDS = 0.05) minimize time-to-first-audio.
 
 Everything stays in memory (no temp files). A session can be cancelled at
 any point (new text copied, stop hotkey) and every stage winds down promptly.
@@ -18,24 +25,87 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import socket
 import threading
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
+import aiohttp
 import edge_tts
+from edge_tts.communicate import _SSL_CTX
+from edge_tts.drm import DRM
 import miniaudio
-
-if TYPE_CHECKING:
-    from audify.kokoro_engine import KokoroEngine
-
-KOKORO_PREFIX = "kokoro:"
 
 # Network limits: fail fast when offline instead of hanging the reader
 CONNECT_TIMEOUT = 5    # seconds to open the websocket
 RECEIVE_TIMEOUT = 10   # seconds of silence from the server before giving up
 MAX_ATTEMPTS = 3
 
-# ~0.1s of audio per decoded block: small enough to start quickly
-DECODE_BLOCK_SECONDS = 0.1
+# Number of chunks to synthesize concurrently so subsequent chunks are already
+# buffered in memory before the currently playing chunk finishes
+MAX_CONCURRENT_CHUNKS = 2
+
+# 50ms of audio per decoded block: starts playback ~50ms faster than 100ms blocks
+DECODE_BLOCK_SECONDS = 0.05
+
+_SPEECH_HOST = "speech.platform.bing.com"
+_SPEECH_PORT = 443
+
+
+class _ReusableTCPConnector(aiohttp.TCPConnector):
+    """Persistent TCPConnector that ignores per-session close() calls from edge-tts.
+
+    edge_tts.Communicate creates an aiohttp.ClientSession(connector=self.connector)
+    with connector_owner=True on each chunk, which normally closes the connector
+    when the chunk finishes and discards the DNS cache. Overriding close() as a
+    no-op keeps the DNS cache (ttl_dns_cache=300) warm across all chunks and sessions.
+    """
+
+    async def close(self, *, abort_ssl: bool = False) -> None:
+        # Intentionally keep the shared connector open across Communicate.stream() calls.
+        return None
+
+
+_shared_connector: _ReusableTCPConnector | None = None
+_shared_connector_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_shared_connector() -> _ReusableTCPConnector:
+    """Return (or lazily create) the persistent TCPConnector bound to the running loop."""
+    global _shared_connector, _shared_connector_loop
+    loop = asyncio.get_running_loop()
+    if _shared_connector is None or _shared_connector_loop is not loop:
+        _shared_connector = _ReusableTCPConnector(
+            limit=8,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            ssl=_SSL_CTX,
+            enable_cleanup_closed=True,
+        )
+        _shared_connector_loop = loop
+    return _shared_connector
+
+
+def prewarm_edge_tts(loop: asyncio.AbstractEventLoop) -> None:
+    """Pre-compute the Sec-MS-GEC v2 token and resolve the Edge TTS host in the background.
+
+    Called once at daemon startup so the very first Ctrl+C skips cold token
+    generation and cold DNS resolution.
+    """
+
+    async def _warm() -> None:
+        try:
+            # 1. Warm the 5-minute LRU cache for Sec-MS-GEC v2 token in edge-tts 7.3.1+
+            DRM.generate_sec_ms_gec()
+            # 2. Create the shared connector on the event loop
+            _get_shared_connector()
+            # 3. Warm the OS and asyncio DNS cache for speech.platform.bing.com
+            await loop.getaddrinfo(
+                _SPEECH_HOST, _SPEECH_PORT, family=socket.AF_INET, type=socket.SOCK_STREAM
+            )
+        except Exception:
+            pass
+
+    asyncio.run_coroutine_threadsafe(_warm(), loop)
 
 
 def rate_to_speed(rate: str) -> float:
@@ -44,18 +114,6 @@ def rate_to_speed(rate: str) -> float:
         return 1.0 + int(rate.strip().rstrip("%")) / 100.0
     except ValueError:
         return 1.0
-
-
-def pause_after(text: str) -> float:
-    """Natural pause (seconds at 1x) to insert after an offline chunk, based on how it ends."""
-    end = text.rstrip()[-1:]
-    if not end:
-        return 0.0
-    if end in ".!?":
-        return 0.22
-    if end in ",;:":
-        return 0.1
-    return 0.0
 
 
 class _ChunkSource(miniaudio.StreamableSource):
@@ -76,7 +134,7 @@ class _ChunkSource(miniaudio.StreamableSource):
             if self._cancelled.is_set():
                 return b""
             try:
-                item = self._feed.get(timeout=0.1)
+                item = self._feed.get(timeout=0.05)
             except queue.Empty:
                 continue
             if item is None:
@@ -103,7 +161,6 @@ class SpeechSession:
         mixer_format: tuple[int, int],
         resolve_text: Callable[[str], str] = lambda t: t,
         on_error: Callable[[str], None] | None = None,
-        kokoro: "KokoroEngine | None" = None,
     ) -> None:
         self.chunks = chunks
         self.voice = voice
@@ -116,50 +173,71 @@ class SpeechSession:
         self._on_error = on_error
         self._feeds: list[queue.Queue[bytes | None]] = [queue.Queue() for _ in chunks]
         self.failed = False  # set when online generation failed for any chunk
-        self._kokoro = kokoro
-        self._kokoro_voice = voice[len(KOKORO_PREFIX):] if voice.startswith(KOKORO_PREFIX) else None
 
     def start(self) -> None:
-        if self._kokoro_voice and self._kokoro:
-            threading.Thread(target=self._produce_offline, daemon=True, name="kokoro-producer").start()
-            return
         asyncio.run_coroutine_threadsafe(self._produce(), self._loop)
         threading.Thread(target=self._decode, daemon=True, name="tts-decoder").start()
 
     def cancel(self) -> None:
         self.cancelled.set()
-        if self._kokoro_voice and self._kokoro:
-            self._kokoro.cancel(self)  # abort the in-flight synthesis instead of waiting it out
 
     # -- Producer: Edge TTS -> MP3 bytes (runs on the shared asyncio loop) ------
 
     async def _produce(self) -> None:
+        """Stream chunks with bounded concurrency so chunk N+1 prefetches while chunk N plays."""
         failed: list[str] = []
-        try:
-            for i, text in enumerate(self.chunks):
-                if self.cancelled.is_set():
-                    break
-                error = await self._stream_chunk(i, self._resolve_text(text))
-                if error:
-                    failed.append(error)
+        sem = asyncio.Semaphore(MAX_CONCURRENT_CHUNKS)
+        connector = _get_shared_connector()
+
+        async def _run_chunk(i: int, raw_text: str) -> None:
+            try:
+                async with sem:
+                    if self.cancelled.is_set():
+                        return
+                    resolved = self._resolve_text(raw_text)
+                    if not resolved.strip():
+                        return
+                    error = await self._stream_chunk(i, resolved, connector)
+                    if error:
+                        failed.append(error)
+            finally:
                 self._feeds[i].put(None)
+
+        try:
+            tasks = [
+                asyncio.create_task(_run_chunk(i, text))
+                for i, text in enumerate(self.chunks)
+            ]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            # Unblock the decoder for any chunks we never reached
+            # Ensure every feed is closed so the decoder never hangs
             for feed in self._feeds:
                 feed.put(None)
+
         self.failed = bool(failed)
         if failed and not self.cancelled.is_set() and self._on_error:
             self._on_error(failed[-1])
 
-    async def _stream_chunk(self, index: int, text: str) -> str | None:
+    async def _stream_chunk(
+        self,
+        index: int,
+        text: str,
+        connector: aiohttp.BaseConnector,
+    ) -> str | None:
         """Stream one chunk into its feed. Returns an error message, or None on success."""
         last_error = "unknown error"
         for attempt in range(1, MAX_ATTEMPTS + 1):
             sent_audio = False
             try:
                 communicate = edge_tts.Communicate(
-                    text, self.voice, rate=self.rate,
-                    connect_timeout=CONNECT_TIMEOUT, receive_timeout=RECEIVE_TIMEOUT,
+                    text,
+                    self.voice,
+                    rate=self.rate,
+                    boundary="SentenceBoundary",
+                    connector=connector,
+                    connect_timeout=CONNECT_TIMEOUT,
+                    receive_timeout=RECEIVE_TIMEOUT,
                 )
                 async for message in communicate.stream():
                     if self.cancelled.is_set():
@@ -174,46 +252,10 @@ class SpeechSession:
                     # Part of this chunk is already playing; a retry would repeat it
                     return f"Speech cut off: {last_error}"
             if attempt < MAX_ATTEMPTS:
-                await asyncio.sleep(0.4 * attempt)
+                await asyncio.sleep(0.35 * attempt)
                 if self.cancelled.is_set():
                     return None
         return f"Speech generation failed: {last_error}"
-
-    # -- Offline producer: Kokoro -> PCM (own thread) ---------------------------
-
-    def _produce_offline(self) -> None:
-        import numpy as np
-        from audify.kokoro_engine import SAMPLE_RATE, clamp_speed
-
-        speed = clamp_speed(rate_to_speed(self.rate))
-        try:
-            for i, text in enumerate(self.chunks):
-                if self.cancelled.is_set():
-                    break
-                samples = self._kokoro.synthesize(self._resolve_text(text), self._kokoro_voice, speed, owner=self)
-                if self.cancelled.is_set():
-                    break
-                pause = pause_after(text) / speed
-                if pause:
-                    samples = np.concatenate([samples, np.zeros(int(pause * SAMPLE_RATE), dtype=np.float32)])
-                self.pcm.put((i, self._to_mixer_pcm(samples, SAMPLE_RATE)))
-        except Exception as e:
-            if not self.cancelled.is_set() and self._on_error:
-                self._on_error(f"Offline voice failed: {e}")
-        finally:
-            self.pcm.put(None)
-
-    def _to_mixer_pcm(self, samples, source_rate: int) -> bytes:
-        """float32 mono -> 16-bit PCM in the mixer's rate and channel layout."""
-        import numpy as np
-
-        if source_rate != self._sample_rate:
-            n = int(len(samples) * self._sample_rate / source_rate)
-            samples = np.interp(np.linspace(0, len(samples) - 1, n), np.arange(len(samples)), samples)
-        pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
-        if self._channels == 2:
-            pcm = np.repeat(pcm, 2)  # interleave identical left/right samples
-        return pcm.tobytes()
 
     # -- Decoder: MP3 bytes -> PCM blocks (own thread) --------------------------
 

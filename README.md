@@ -6,8 +6,7 @@
 
 **Copy text. Hear it instantly.**
 
-A lightweight Windows tray app that reads your clipboard aloud with natural neural voices,
-online through Microsoft Edge or fully offline on your own PC.
+A lightweight Windows tray app that reads your clipboard aloud with natural Microsoft Edge Neural voices.
 
 [![Latest release](https://img.shields.io/github/v/release/Yeamin-Sheikh/Audify?label=release&color=7c3aed)](https://github.com/Yeamin-Sheikh/Audify/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/Yeamin-Sheikh/Audify/total?color=6366f1)](https://github.com/Yeamin-Sheikh/Audify/releases)
@@ -28,9 +27,9 @@ online through Microsoft Edge or fully offline on your own PC.
 ## Why Audify?
 
 Reading long answers, docs and emails gets tiring. With Audify you **just press `Ctrl+C`** and it starts
-talking in about a second, without opening an app or clicking a button. It sits quietly in the system
+talking in under a second, without opening an app or clicking a button. It sits quietly in the system
 tray, understands Markdown and code, and knows how to say developer jargon properly
-(`__init__.py`, `GPT-4o`, `C#`, `k8s`, `TL;DR`...).
+`__init__.py`, `GPT-4o`, `C#`, `k8s`, `TL;DR`.
 
 ## Features
 
@@ -38,38 +37,38 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 <tr>
 <td width="50%" valign="top">
 
-### 🎧 Hands-free reading
-- **Copy to listen**: `Ctrl+C` / `Ctrl+X` text and it's read aloud right away.
-- **Streams as it speaks**: audio starts in **~1 second**, before the whole text is generated.
-- **Gapless playback**: long texts flow without pauses between sentences.
-- **Wispr Flow proof**: ignores clipboard changes you didn't make yourself.
+### Hands-free reading
+- **Copy to listen**: `Ctrl+C`, `Ctrl+X`, `Ctrl+Shift+C`, or `Ctrl+Insert` text and it is read aloud right away.
+- **Sub-second start**: persistent DNS/SSL caching, token pre-warming, and 50ms streaming decode blocks start audio in **~0.4 to 0.7 seconds**.
+- **Gapless playback**: concurrent chunk prefetching buffers the next paragraph while the current one plays.
+- **Wispr Flow proof**: ignores clipboard changes you did not make yourself.
 
 </td>
 <td width="50%" valign="top">
 
-### 🗣️ Voices that sound human
-- **26 voices**: 13 online Microsoft Neural voices plus 13 offline Kokoro voices.
-- **Works offline**: Kokoro runs on your PC with no internet and no account.
-- **8 speeds, changeable mid-sentence**: Audify picks up again from the sentence you're on.
-- **Busy-PC safety net**: if offline speech can't keep up, Audify hands over to an online voice instead of stuttering.
+### Natural neural voices
+- **17 Microsoft Neural voices**: American and British female and male voices, including multilingual models (`Emma`, `Ava`, `Andrew`, `Brian`).
+- **Zero CPU synthesis load**: all synthesis runs on Microsoft's neural endpoint with minimal local RAM (~45 MB).
+- **8 speeds, changeable mid-sentence**: from `0.5x` to `3.0x`, resuming immediately from the sentence you are on.
+- **Weekly update checks**: automatically checks PyPI weekly for `edge-tts` protocol updates.
 
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
 
-### 🧠 Speaks developer
+### Speaks developer
 - **~580 built-in pronunciations** for code, AI, cloud and Windows terms.
 - **Your own dictionary**: add, search and edit rules in the Control Center.
-- **Code aware**: skips fenced code blocks (optional) and reads inline code properly.
+- **Code aware**: skips fenced code blocks and reads inline code properly.
 - **Smart matching**: `IT` the acronym never touches the word "it".
 
 </td>
 <td width="50%" valign="top">
 
-### 🪶 Light and dependable
-- **~70 MB** of memory with online voices; the offline model unloads after a minute idle.
-- **Global stop hotkey** (`Ctrl+Alt+S`) stops everything instantly.
+### Light and dependable
+- **~27 MB portable build** with no bulky local ONNX models required.
+- **Global stop hotkey** `Ctrl+Alt+S` stops everything instantly.
 - **Fails fast offline** and never misses a copy while another app holds the clipboard.
 - **Crash-safe settings** with automatic backup.
 
@@ -79,35 +78,27 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ## Voices
 
-| | Online (Microsoft Edge) | Offline (Kokoro) |
-|---|---|---|
-| **Voices** | Jenny, Aria, Michelle, Ava, Jane, Ana, Christopher, Guy, Steffan, Brian, Andrew, Eric, Roger | Heart, Bella, Nicole, Sarah, Aoede, Kore, Emma 🇬🇧, Isabella 🇬🇧, Michael, Fenrir, Puck, George 🇬🇧, Fable 🇬🇧 |
-| **Needs internet** | Yes | No |
-| **Runs on** | Microsoft's servers | Your CPU (~25-35% while speaking) |
-| **Speeds** | 0.5x to 3.0x | 0.5x to 3.0x |
-| **Best for** | Fastest start, very high speeds | Privacy, offline use, natural tone |
-
-> [!TIP]
-> Offline voices always speak at their natural 1x pace, and Audify then speeds the audio up or down
-> without changing the pitch. Words stay clearer than with Kokoro's own fast speech.
+| Group | Voices |
+|---|---|
+| **American Female** | Jenny, Emma Multilingual, Ava Multilingual, Aria, Michelle, Ana |
+| **British Female** | Sonia, Libby |
+| **American Male** | Andrew Multilingual, Brian Multilingual, Christopher, Guy, Steffan, Eric, Roger |
+| **British Male** | Ryan, Thomas |
 
 ## Installation
 
-### Installer (recommended)
+### Installer
 
-1. Download **`Setup_Audify_2.8.2.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.0.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
-The installer includes the offline voice model, so every voice works right away.
-
 ### Portable
 
-Download **`Audify.exe`** and run it from anywhere. The first time you choose an offline voice, Audify
-downloads the voice model (~200 MB) once.
+Download **`Audify.exe`** and run it from anywhere.
 
 > [!NOTE]
-> Windows SmartScreen may warn about an unrecognised app on first launch. Choose **More info → Run anyway**.
+> Windows SmartScreen may warn about an unrecognised app on first launch. Choose **More info -> Run anyway**.
 
 ## Usage
 
@@ -121,16 +112,16 @@ downloads the voice model (~200 MB) once.
 
 | To... | Do this |
 |---|---|
-| Read text aloud | Copy it with `Ctrl+C` |
+| Read text aloud | Copy it with `Ctrl+C` or `Ctrl+Shift+C` |
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
-| Change voice | Tray → **Voice** → Online voices / Offline voices |
-| Change speed (works mid-sentence) | Tray → **Speed** |
-| Change volume | Tray → **Volume** |
-| Skip code blocks | Tray → **Skip Code Blocks** |
-| Edit pronunciations, voice, speed | Tray → **Control Center...** |
-| Read the clipboard again | Tray → **Read Clipboard Now** / **Replay Last** |
-| Quit | Tray → **Quit Audify** |
+| Change voice | Tray -> **Voice** |
+| Change speed | Tray -> **Speed** |
+| Change volume | Tray -> **Volume** |
+| Skip code blocks | Tray -> **Skip Code Blocks** |
+| Edit pronunciations, voice, speed | Tray -> **Control Center...** |
+| Read the clipboard again | Tray -> **Read Clipboard Now** / **Replay Last** |
+| Quit | Tray -> **Quit Audify** |
 
 ### Control Center shortcuts
 
@@ -150,7 +141,7 @@ downloads the voice model (~200 MB) once.
 ### Prerequisites
 
 - Windows 10/11, Python 3.11+
-- [Inno Setup 6](https://jrsoftware.org/isinfo.php) (only for the installer)
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) for building the installer
 
 ### Setup
 
@@ -158,12 +149,6 @@ downloads the voice model (~200 MB) once.
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-Offline voices need the Kokoro model files in `models\` (from source they also download on first use):
-
-```bash
-gh release download model-files-v1.0 --repo thewh1teagle/kokoro-onnx -D models -p "kokoro-v1.0.fp16.onnx" -p "voices-v1.0.bin"
 ```
 
 ### Run
@@ -180,10 +165,9 @@ build_exe.bat
 ```
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
-installer uses (it starts faster because nothing is unpacked at launch). The installer is written to
-`Output\Setup_Audify_2.8.2.exe`.
+installer uses. The installer is written to `Output\Setup_Audify_2.9.0.exe`.
 
-Check that a build really works, including offline voices:
+Verify that a build works end-to-end:
 
 ```bash
 Audify.exe --selftest report.txt
@@ -194,9 +178,9 @@ Audify.exe --selftest report.txt
 ```
 audify/
 ├── __main__.py              Entry point, single-instance guard, --selftest
-├── engine.py                Reader: clipboard queue, playback, speed/voice changes, fallback
-├── playback.py              Streaming sessions: Edge MP3 decoding and Kokoro PCM, gapless
-├── kokoro_engine.py         Offline voices: lazy load, idle unload, time-stretch speed, cancelling
+├── engine.py                Reader: clipboard queue, playback, speed/voice changes
+├── playback.py              Low-latency Edge TTS streaming, concurrent chunk prefetch, MP3->PCM decode
+├── updater.py               Weekly PyPI update checker for edge-tts
 ├── clipboard.py             Event-driven Win32 clipboard listener
 ├── config.py                Settings, voices, speeds, crash-safe saving
 ├── pronunciation_library.py Built-in developer pronunciation library
@@ -210,6 +194,15 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.0
+
+- **Upgraded to `edge-tts 7.3.1`**: adds Sec-MS-GEC v2 token authentication and locale-independent server clock-skew parsing to fix Microsoft's October 2026 `HTTP 403` endpoint change.
+- **Removed local Kokoro ONNX engine**: eliminated high CPU usage and over 600 MB of local ONNX model and runtime files, shrinking the installer from 209 MB to ~27 MB.
+- **Faster response time**: added startup token and DNS pre-warming, a persistent DNS-caching `TCPConnector`, 2-chunk concurrent prefetching, 50ms decode blocks, and an 80-character first-chunk target.
+- **Updated voice lineup**: added `Emma Multilingual` and British Neural voices (`Sonia`, `Libby`, `Ryan`, `Thomas`) and removed retired `en-US-JaneNeural`.
+- **Weekly update checks**: added `audify/updater.py` to check PyPI weekly for `edge-tts` updates.
+- **Terminal copy shortcuts**: added `Ctrl+Shift+C` and `Ctrl+Insert` triggers alongside `Ctrl+C` and `Ctrl+X`.
 
 ### v2.8.2
 
