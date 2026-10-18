@@ -18,7 +18,19 @@ import pygame
 import keyboard
 import pynput.mouse as pynput_mouse
 
-from audify.clipboard import ClipboardListener
+from audify.clipboard import (
+    ClipboardListener,
+    MOD_ALT,
+    MOD_CONTROL,
+    MOD_SHIFT,
+    VK_CONTROL,
+    VK_MENU,
+    VK_SHIFT,
+    check_copy_keys,
+    is_ctrl_pressed,
+    is_vk_down,
+    parse_win32_hotkey,
+)
 from audify.playback import SpeechSession, prewarm_edge_tts, rate_to_speed
 from audify.updater import start_weekly_update_checker
 from audify.config import (
@@ -55,8 +67,16 @@ class TTSDaemon:
         self._config_lock = threading.Lock()
         self._save_timer: threading.Timer | None = None
 
-        # Wispr Flow heuristic -- tracks when the user last pressed Ctrl+C/X
+        # Wispr Flow heuristic -- tracks when the user last triggered a manual copy or click
         self.last_ctrl_c_time: float = 0.0
+        self._last_stop_time: float = 0.0
+
+        # Parse stop hotkey (default ctrl+alt+s) into Win32 modifiers + VK code
+        stop_hotkey_str = str(self.config.get("stop_hotkey", "ctrl+alt+s"))
+        self._stop_hotkey_parsed = parse_win32_hotkey(stop_hotkey_str) or (
+            MOD_CONTROL | MOD_ALT,
+            ord("S"),
+        )
 
         # Persistent event loop for TTS
         self._loop = asyncio.new_event_loop()
@@ -65,8 +85,12 @@ class TTSDaemon:
         # Pre-warm Sec-MS-GEC v2 token, shared TCPConnector, and DNS cache
         prewarm_edge_tts(self._loop)
 
-        # Event-driven clipboard listener
-        self._clip_listener = ClipboardListener(self._on_clipboard_change)
+        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop_hotkey
+        self._clip_listener = ClipboardListener(
+            self._on_clipboard_change,
+            stop_hotkey=stop_hotkey_str,
+            on_stop_hotkey=self.stop_audio,
+        )
 
         # Tray icon (injected later)
         self.tray_icon = None
@@ -93,23 +117,23 @@ class TTSDaemon:
         self._tts_channel = pygame.mixer.Channel(0)
         self._tts_channel.set_volume(self.config.get("volume", 1.0))
 
-        # Bind global hotkeys
-        try:
-            keyboard.add_hotkey(
-                self.config.get("stop_hotkey", "ctrl+alt+s"), self.stop_audio
-            )
-            # Hooks for standard and terminal copy shortcuts to detect manual copying
-            for copy_hotkey in ("ctrl+c", "ctrl+x", "ctrl+shift+c", "ctrl+insert"):
-                try:
-                    keyboard.add_hotkey(copy_hotkey, self.mark_manual_copy)
-                except Exception:
-                    pass
+        # Layer 1: Win32 hardware key/mouse state poller (works in Administrator windows
+        # where UIPI blocks WH_KEYBOARD_LL, and never suffers from stuck keys or sleep unhooking)
+        threading.Thread(
+            target=self._poll_input_state_loop,
+            daemon=True,
+            name="win32-input-poller",
+        ).start()
 
-            # Mouse hook to detect Right-Click -> Copy
+        # Layer 2: Stateless keyboard.on_press and mouse hooks for instant 0ms event capture
+        # (avoids keyboard.add_hotkey's _pressed_events dict, which permanently breaks if
+        # any KEY_UP is missed during Alt+Tab or UAC)
+        try:
+            keyboard.on_press(self._on_key_press)
             self.mouse_listener = pynput_mouse.Listener(on_click=self.on_mouse_click)
             self.mouse_listener.start()
         except Exception as e:
-            print(f"[WARN] Failed to bind hotkey: {e}")
+            print(f"[WARN] Failed to bind input hook: {e}")
 
         # Start periodic weekly check for edge-tts updates on PyPI
         start_weekly_update_checker(self)
@@ -119,6 +143,49 @@ class TTSDaemon:
         self._loop.run_forever()
 
     # -- Hotkey / mouse callbacks ------------------------------------------
+
+    def _is_stop_combo_down(self) -> bool:
+        """Return True if the configured stop hotkey (e.g. Ctrl+Alt+S) is physically held down."""
+        mods, vk = self._stop_hotkey_parsed
+        if not is_vk_down(vk):
+            return False
+        if (mods & MOD_CONTROL) and not is_vk_down(VK_CONTROL):
+            return False
+        if (mods & MOD_ALT) and not is_vk_down(VK_MENU):
+            return False
+        if (mods & MOD_SHIFT) and not is_vk_down(VK_SHIFT):
+            return False
+        return True
+
+    def _poll_input_state_loop(self) -> None:
+        """Poll Win32 GetAsyncKeyState every 15ms so copy/stop keys work even in Admin windows."""
+        # Flush any pre-startup 0x0001 bits from key/mouse presses before Audify launched
+        try:
+            check_copy_keys()
+        except Exception:
+            pass
+        while True:
+            try:
+                if check_copy_keys():
+                    self.last_ctrl_c_time = time.time()
+                if self._is_stop_combo_down():
+                    self.stop_audio()
+            except Exception:
+                pass
+            time.sleep(0.015)
+
+    def _on_key_press(self, event: keyboard.KeyboardEvent) -> None:
+        """Stateless key-down callback that queries physical modifier state via Win32."""
+        try:
+            # Prevent keyboard library's internal _pressed_events from accumulating stuck keys
+            keyboard._pressed_events.clear()
+        except Exception:
+            pass
+        name = (getattr(event, "name", "") or "").lower()
+        if name in ("c", "x", "insert", "ins") and is_ctrl_pressed():
+            self.last_ctrl_c_time = time.time()
+        elif self._is_stop_combo_down():
+            self.stop_audio()
 
     def on_mouse_click(
         self, x: int, y: int, button: pynput_mouse.Button, pressed: bool
@@ -191,6 +258,10 @@ class TTSDaemon:
         Bumping the generation makes the worker abandon the rest of the text;
         stopping the channel alone would only cut the current chunk.
         """
+        now = time.monotonic()
+        if (now - self._last_stop_time) < 0.15:
+            return
+        self._last_stop_time = now
         self._stop_generation += 1
         self._halt_channel()
 
@@ -424,9 +495,8 @@ class TTSDaemon:
             if not cleaned.strip():
                 continue
 
-            # Skip if we already just spoke this exact text
-            if cleaned == self.last_spoken:
-                continue
+            # Record for "Replay Last" in the tray menu (250ms burst deduplication
+            # is handled in ClipboardListener._wnd_proc so intentional re-copies speak)
             self.last_spoken = cleaned
 
             self._halt_channel()
@@ -574,18 +644,24 @@ class TTSDaemon:
         if is_just_url(text):
             return
 
-        # Fast path: check immediately (0ms latency). The keyboard hook
-        # fires within ~1-5ms of keypress, so this succeeds most of the time.
+        # Direct Win32 hardware key check at the millisecond WM_CLIPBOARDUPDATE arrives
+        if check_copy_keys():
+            self.last_ctrl_c_time = time.time()
+            self.q.put(text)
+            return
+
+        # Fast path: check immediately (0ms latency). The keyboard hook or 15ms poller
+        # fires within ~1-15ms of keypress, so this succeeds immediately.
         time_since_copy = time.time() - self.last_ctrl_c_time
         if time_since_copy <= 1.5:
             self.q.put(text)
             return
 
-        # Slow path: keyboard hook might not have fired yet (rare race).
-        # Wait 30ms and retry once.
+        # Slow path: keyboard hook or poller might be mid-tick (rare race).
+        # Wait 35ms and retry once.
         def _retry():
-            time_since = time.time() - self.last_ctrl_c_time
-            if time_since <= 1.55:
+            if check_copy_keys() or (time.time() - self.last_ctrl_c_time) <= 1.55:
+                self.last_ctrl_c_time = time.time()
                 self.q.put(text)
 
-        threading.Timer(0.03, _retry).start()
+        threading.Timer(0.035, _retry).start()

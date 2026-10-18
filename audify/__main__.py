@@ -45,7 +45,26 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"edge-tts: FAILED {e!r}")
 
-    # 3. Verify live streaming + decoding pipeline
+    # 3. Verify Win32 clipboard listener + RegisterHotKey
+    try:
+        from audify.clipboard import ClipboardListener, check_copy_keys, parse_win32_hotkey
+
+        parsed = parse_win32_hotkey("ctrl+alt+s")
+        if not parsed:
+            raise RuntimeError("parse_win32_hotkey('ctrl+alt+s') returned None")
+        check_copy_keys()
+        listener = ClipboardListener(lambda _t: None, stop_hotkey="ctrl+alt+f12", on_stop_hotkey=lambda: None)
+        listener.start()
+        hotkey_ok = listener._hotkey_registered
+        listener.stop()
+        if not hotkey_ok:
+            raise RuntimeError("Win32 RegisterHotKey failed on message window")
+        lines.append("hotkeys: ok (Win32 RegisterHotKey + GetAsyncKeyState)")
+    except Exception as e:
+        ok = False
+        lines.append(f"hotkeys: FAILED {e!r}")
+
+    # 4. Verify live streaming + decoding pipeline
     try:
         from audify.playback import SpeechSession
 

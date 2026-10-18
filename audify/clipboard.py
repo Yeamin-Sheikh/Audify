@@ -1,9 +1,9 @@
 """
-clipboard -- Win32 event-driven clipboard listener.
+clipboard -- Win32 event-driven clipboard listener and native hotkey handler.
 
 Uses AddClipboardFormatListener to receive instant WM_CLIPBOARDUPDATE
-notifications instead of polling. Runs on a background daemon thread
-with its own Win32 message pump.
+notifications and RegisterHotKey to receive kernel-level WM_HOTKEY events
+(such as Ctrl+Alt+S to stop playback) on the same Win32 message pump.
 """
 
 from __future__ import annotations
@@ -22,9 +22,32 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 # Win32 message constants
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
+WM_HOTKEY = 0x0312
 WM_CLIPBOARDUPDATE = 0x031D
 HWND_MESSAGE = wintypes.HWND(-3)  # Message-only window (no taskbar icon)
 CF_UNICODETEXT = 13
+
+# Win32 RegisterHotKey modifier flags
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+MOD_NOREPEAT = 0x4000
+HOTKEY_ID_STOP = 1
+
+# Win32 Virtual-Key codes for direct physical state queries via GetAsyncKeyState
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12      # Alt key
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_INSERT = 0x2D
+VK_DELETE = 0x2E
+VK_C = 0x43
+VK_X = 0x58
 
 # Callback type for the window procedure
 LRESULT = ctypes.c_ssize_t
@@ -76,6 +99,16 @@ user32.AddClipboardFormatListener.restype = wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
 user32.RemoveClipboardFormatListener.restype = wintypes.BOOL
 
+user32.RegisterHotKey.argtypes = [
+    wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT,
+]
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = wintypes.BOOL
+
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = wintypes.SHORT
+
 user32.GetMessageW.argtypes = [
     ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT,
 ]
@@ -105,6 +138,96 @@ kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
 kernel32.GlobalLock.restype = ctypes.c_wchar_p
 kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
 kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+
+# -- Hardware key state helpers (immune to WH_KEYBOARD_LL stuck keys & UIPI) --
+
+_key_state_lock = threading.Lock()
+
+
+def is_vk_down(vk: int) -> bool:
+    """Return True if virtual-key ``vk`` is physically held down right now."""
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def is_ctrl_pressed() -> bool:
+    """Return True if either Left or Right Ctrl is physically held down."""
+    return is_vk_down(VK_CONTROL)
+
+
+def check_copy_keys() -> bool:
+    """Check via Win32 GetAsyncKeyState if a manual copy key or mouse click occurred.
+
+    Polled every 15ms and also called at the moment WM_CLIPBOARDUPDATE fires:
+      * Calling GetAsyncKeyState every 15ms clears any stale 0x0001 ('pressed since
+        last query') bit when C/X/Insert is typed without Ctrl.
+      * When Ctrl+C, Ctrl+X, Ctrl+Shift+C, or Ctrl+Insert is pressed (even in an
+        Administrator window where UIPI blocks WH_KEYBOARD_LL hooks, or on a <10ms
+        tap), both VK_CONTROL and the copy key report non-zero state.
+    """
+    with _key_state_lock:
+        ctrl_state = user32.GetAsyncKeyState(VK_CONTROL)
+        c_state = user32.GetAsyncKeyState(VK_C)
+        x_state = user32.GetAsyncKeyState(VK_X)
+        ins_state = user32.GetAsyncKeyState(VK_INSERT)
+        lmb_state = user32.GetAsyncKeyState(VK_LBUTTON)
+        rmb_state = user32.GetAsyncKeyState(VK_RBUTTON)
+
+        if ctrl_state != 0 and (c_state != 0 or x_state != 0 or ins_state != 0):
+            return True
+        if lmb_state != 0 or rmb_state != 0:
+            return True
+        return False
+
+
+def parse_win32_hotkey(hotkey_str: str) -> tuple[int, int] | None:
+    """Convert a hotkey string like 'ctrl+alt+s' into (win32_modifiers, vk_code)."""
+    parts = [p.strip().lower() for p in hotkey_str.split("+") if p.strip()]
+    if not parts:
+        return None
+
+    mods = 0
+    key_part = ""
+    for part in parts:
+        if part in ("ctrl", "control", "left ctrl", "right ctrl"):
+            mods |= MOD_CONTROL
+        elif part in ("alt", "menu", "left alt", "right alt"):
+            mods |= MOD_ALT
+        elif part in ("shift", "left shift", "right shift"):
+            mods |= MOD_SHIFT
+        elif part in ("win", "windows", "left windows", "right windows"):
+            mods |= MOD_WIN
+        else:
+            key_part = part
+
+    if not key_part:
+        return None
+
+    special_vks = {
+        "esc": VK_ESCAPE,
+        "escape": VK_ESCAPE,
+        "space": VK_SPACE,
+        "enter": VK_RETURN,
+        "return": VK_RETURN,
+        "ins": VK_INSERT,
+        "insert": VK_INSERT,
+        "del": VK_DELETE,
+        "delete": VK_DELETE,
+    }
+    if key_part in special_vks:
+        vk = special_vks[key_part]
+    elif len(key_part) == 1 and key_part.isalnum():
+        vk = ord(key_part.upper())
+    elif key_part.startswith("f") and key_part[1:].isdigit():
+        fn = int(key_part[1:])
+        if 1 <= fn <= 24:
+            vk = 0x70 + (fn - 1)
+        else:
+            return None
+    else:
+        return None
+
+    return mods, vk
 
 
 def _open_clipboard(attempts: int = 10, delay: float = 0.01) -> bool:
@@ -141,21 +264,22 @@ def get_clipboard_text() -> str:
 
 
 class ClipboardListener:
-    """Listens for clipboard changes via Win32 WM_CLIPBOARDUPDATE.
+    """Listens for clipboard changes (WM_CLIPBOARDUPDATE) and global stop hotkey (WM_HOTKEY).
 
-    Calls `on_text_change(text)` whenever the clipboard text content changes.
-    Runs its own message pump on a background daemon thread, so it doesn't
-    block the calling thread.
-
-    Usage:
-        listener = ClipboardListener(my_callback)
-        listener.start()   # non-blocking
-        ...
-        listener.stop()     # clean shutdown
+    Calls ``on_text_change(text)`` whenever the clipboard text content is updated,
+    and ``on_stop_hotkey()`` when the registered Win32 stop hotkey is pressed.
+    Runs its own message pump on a background daemon thread.
     """
 
-    def __init__(self, on_text_change: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        on_text_change: Callable[[str], None],
+        stop_hotkey: str = "ctrl+alt+s",
+        on_stop_hotkey: Callable[[], None] | None = None,
+    ) -> None:
         self.on_text_change = on_text_change
+        self.stop_hotkey = stop_hotkey
+        self.on_stop_hotkey = on_stop_hotkey
         self._hwnd: int | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -163,14 +287,27 @@ class ClipboardListener:
         # prevent GC of the ctypes callback function pointer
         self._wnd_proc_ref: WNDPROC | None = None
         self._last_text: str = ""
+        self._last_update_time: float = 0.0
+        self._hotkey_registered: bool = False
 
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
-        """Win32 window procedure. Handles clipboard update messages."""
+        """Win32 window procedure. Handles clipboard updates and native global hotkeys."""
+        if msg == WM_HOTKEY:
+            if wparam == HOTKEY_ID_STOP and self.on_stop_hotkey:
+                try:
+                    self.on_stop_hotkey()
+                except Exception:
+                    pass
+            return 0
         if msg == WM_CLIPBOARDUPDATE:
             try:
+                now = time.monotonic()
                 text = get_clipboard_text()
-                if text and text != self._last_text:
+                # Deduplicate only rapid double-writes (<250ms) from the same copy action
+                # so copying the same selection again intentionally still triggers reading.
+                if text and (text != self._last_text or (now - self._last_update_time) >= 0.25):
                     self._last_text = text
+                    self._last_update_time = now
                     self.on_text_change(text)
             except Exception:
                 pass
@@ -214,9 +351,17 @@ class ClipboardListener:
             self._ready.set()
             return
 
+        # Register native Win32 global stop hotkey (e.g. Ctrl+Alt+S) on this message pump
+        parsed = parse_win32_hotkey(self.stop_hotkey)
+        if parsed and self.on_stop_hotkey:
+            mods, vk = parsed
+            if user32.RegisterHotKey(self._hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
+                self._hotkey_registered = True
+
         # Snapshot current clipboard so we don't fire on startup
         try:
             self._last_text = get_clipboard_text()
+            self._last_update_time = time.monotonic()
         except Exception:
             pass
 
@@ -229,6 +374,9 @@ class ClipboardListener:
             user32.DispatchMessageW(ctypes.byref(msg))
 
         # Cleanup
+        if self._hotkey_registered:
+            user32.UnregisterHotKey(self._hwnd, HOTKEY_ID_STOP)
+            self._hotkey_registered = False
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.UnregisterClassW(self._class_name, h_inst)
 

@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.0.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.1.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -165,7 +165,7 @@ build_exe.bat
 ```
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
-installer uses. The installer is written to `Output\Setup_Audify_2.9.0.exe`.
+installer uses. The installer is written to `Output\Setup_Audify_2.9.1.exe`.
 
 Verify that a build works end-to-end:
 
@@ -181,7 +181,7 @@ audify/
 ├── engine.py                Reader: clipboard queue, playback, speed/voice changes
 ├── playback.py              Low-latency Edge TTS streaming, concurrent chunk prefetch, MP3->PCM decode
 ├── updater.py               Weekly PyPI update checker for edge-tts
-├── clipboard.py             Event-driven Win32 clipboard listener
+├── clipboard.py             Event-driven Win32 clipboard listener and native RegisterHotKey
 ├── config.py                Settings, voices, speeds, crash-safe saving
 ├── pronunciation_library.py Built-in developer pronunciation library
 ├── tray.py                  Tray icon and menu
@@ -194,6 +194,11 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.1
+
+- **Native Win32 hotkeys and copy detection**: replaced `keyboard.add_hotkey` with kernel-level `RegisterHotKey` (`WM_HOTKEY`), a 15ms `GetAsyncKeyState` hardware state poller, and a stateless `on_press` handler. Eliminates the stuck-key bug after `Alt+Tab` or UAC prompts, fixes fast key-tap races, and enables `Ctrl+C`, `Ctrl+X`, `Ctrl+Shift+C`, `Ctrl+Insert`, and `Ctrl+Alt+S` even when Administrator windows have focus.
+- **Re-copy support after stopping**: pressing `Ctrl+Alt+S` resets duplicate suppression so copying the same selection again reads it aloud immediately.
 
 ### v2.9.0
 

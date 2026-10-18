@@ -6,12 +6,38 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-16
+- **Last updated:** 2026-10-18
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-18, v2.9.1 native Win32 hotkey and copy shortcut fix
+
+**Duration:** ~15m
+**Status:** Done
+
+#### What changed
+- Replaced `keyboard.add_hotkey` with a 3-layer native Win32 hotkey and copy-detection system in `audify/clipboard.py` and `audify/engine.py`.
+- Added kernel-level `user32.RegisterHotKey` (`WM_HOTKEY`) on `ClipboardListener`'s Win32 message pump for `stop_hotkey` (`ctrl+alt+s`), making it immune to `WH_KEYBOARD_LL` unhooking, `keyboard._pressed_events` stuck keys, and Administrator window UIPI blocking.
+- Added `check_copy_keys()` using `user32.GetAsyncKeyState` (`VK_CONTROL`, `VK_C`, `VK_X`, `VK_INSERT`, `VK_LBUTTON`, `VK_RBUTTON`) polled every 15ms and checked on `WM_CLIPBOARDUPDATE`, plus a stateless `keyboard.on_press` handler that clears `keyboard._pressed_events`.
+- Updated `ClipboardListener._wnd_proc` to only deduplicate identical `WM_CLIPBOARDUPDATE` bursts within 250ms, and cleared `self.last_spoken` in `TTSDaemon.stop_audio()` so re-copying the same text after stopping reads it again.
+
+#### Files touched
+- `audify/clipboard.py`, added `RegisterHotKey`/`WM_HOTKEY`, `parse_win32_hotkey()`, `check_copy_keys()`, and 250ms burst deduplication.
+- `audify/engine.py`, replaced `keyboard.add_hotkey` with `_poll_input_state_loop()`, stateless `_on_key_press()`, and `last_spoken` reset on `stop_audio()`.
+- `audify/__main__.py`, added Win32 hotkey registration check to `--selftest`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.1`.
+
+#### Issues found
+- `keyboard.add_hotkey` in `keyboard==0.13.5` matches `tuple(sorted(_pressed_events))` by exact equality; any missed `KEY_UP` across `Alt+Tab` into an elevated window or UAC prompt leaves a stuck scan code in `_pressed_events` and permanently breaks all `add_hotkey` bindings.
+- `keyboard.add_hotkey` also had a thread race on fast `<15ms` key taps where `_pressed_events` was emptied by `KEY_UP` before `processing_thread` ran `pre_process_event`.
+
+#### Next steps
+- Rebuild `Audify.exe` and `Setup_Audify_2.9.1.exe` and update installed application.
+
+---
 
 ### 2026-10-16, v2.9.0 edge-tts 7.3.1 upgrade and Kokoro removal
 
