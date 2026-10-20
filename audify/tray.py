@@ -15,6 +15,7 @@ from pystray import MenuItem as item
 from audify import __version__
 from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
 from audify.clipboard import get_clipboard_text
+from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
 from audify.config import (
     HISTORY_FILE,
     VOICES,
@@ -247,6 +248,10 @@ def setup_tray() -> None:
         """Run the elevated Intel Wireless Bluetooth driver restart workflow."""
         restart_bluetooth_driver(daemon=daemon)
 
+    def on_reset_icon_cache(icon: pystray.Icon, item_action: item) -> None:
+        """Run the Windows Icon Cache Reset workflow and restart Explorer."""
+        reset_icon_cache(daemon=daemon)
+
     def on_exit(icon: pystray.Icon, item_action: item) -> None:
         daemon.on_state_change = None
         daemon.stop_audio()
@@ -369,6 +374,11 @@ def setup_tray() -> None:
                 lambda text: "Restarting Bluetooth..." if is_bluetooth_restarting() else "Restart Bluetooth",
                 on_restart_bluetooth,
                 enabled=lambda i: not is_bluetooth_restarting(),
+            ),
+            item(
+                lambda text: "Resetting Icon Cache..." if is_icon_cache_resetting() else "Reset Icon Cache",
+                on_reset_icon_cache,
+                enabled=lambda i: not is_icon_cache_resetting(),
             ),
             item("Control Center...", on_open_settings),
             item("Quit Audify", on_exit),

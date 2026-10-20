@@ -94,7 +94,7 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"audio-mixer: FAILED {e!r}")
 
-    # 5. Verify Bluetooth driver restarter module
+    # 5. Verify Bluetooth driver restarter and Icon Cache resetter modules
     try:
         from audify.bluetooth import (
             DEFAULT_BT_INSTANCE_ID,
@@ -102,14 +102,17 @@ def _selftest(report_path: str) -> int:
             _BATCH_SCRIPT,
             is_bluetooth_restarting,
         )
+        from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
 
         if DEFAULT_BT_INSTANCE_ID not in _BATCH_SCRIPT or is_bluetooth_restarting():
             raise RuntimeError("Bluetooth restarter configuration invalid")
+        if is_icon_cache_resetting() or not callable(reset_icon_cache):
+            raise RuntimeError("Icon cache resetter configuration invalid")
         _ = ctypes.sizeof(SHELLEXECUTEINFOW)
-        lines.append(f"bluetooth-restarter: ok ({DEFAULT_BT_INSTANCE_ID})")
+        lines.append(f"system-tools: ok (bluetooth={DEFAULT_BT_INSTANCE_ID}, icon-cache=ready)")
     except Exception as e:
         ok = False
-        lines.append(f"bluetooth-restarter: FAILED {e!r}")
+        lines.append(f"system-tools: FAILED {e!r}")
 
     # 6. Verify live streaming + decoding pipeline
     try:

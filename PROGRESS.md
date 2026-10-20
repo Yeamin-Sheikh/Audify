@@ -13,6 +13,24 @@
 
 ## Progress log
 
+### 2026-10-21, v2.9.4 built-in Windows Icon Cache Reset utility
+
+**Duration:** ~8m
+**Status:** Done
+
+#### What changed
+- Added `audify/icon_cache.py` implementing the silent Windows Icon Cache Reset workflow (`taskkill /f /im explorer.exe`, deleting `%LOCALAPPDATA%\IconCache.db` and `Explorer\iconcache_*.db`, restarting `explorer.exe`, running `ie4uinit.exe -show`, and re-registering Audify's tray icon once the taskbar reloads).
+- Added **Reset Icon Cache** to the system tray context menu in `audify/tray.py` and placed **Restart Bluetooth** and **Reset Icon Cache** side-by-side under **System Tools** in the Control Center sidebar (`audify/gui/control_center.py`).
+- Bumped version to `2.9.4`.
+
+#### Files touched
+- `audify/icon_cache.py`, new module for silent Windows icon cache reset and Explorer restart.
+- `audify/tray.py`, added **Reset Icon Cache** menu item.
+- `audify/gui/control_center.py`, grouped **Restart Bluetooth** and **Reset Icon Cache** in a 2-column horizontal row under **System Tools**.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.4`.
+
+---
+
 ### 2026-10-21, v2.9.3 built-in Intel Wireless Bluetooth driver restarter
 
 **Duration:** ~10m

@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.3.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.4.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -194,6 +194,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.4
+
+- **Built-in Windows Icon Cache Reset utility**: added `audify/icon_cache.py` with a one-click **Reset Icon Cache** option in both the system tray menu and the Control Center **System Tools** row. Silently stops `explorer.exe`, deletes `%LOCALAPPDATA%\IconCache.db` and `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db`, restarts `explorer.exe`, refreshes shell icons via `ie4uinit.exe -show`, and re-registers Audify's tray icon.
 
 ### v2.9.3
 

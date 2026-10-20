@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from audify import __version__
 from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
+from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
 from audify.config import VOICES, RATES, remove_rule, save_config, set_rule
 from audify.gui.widgets import (
     FluentSlider,
@@ -352,26 +353,26 @@ def _run_control_center(daemon: Any) -> None:
         w.bind("<Button-1>", lambda e: skip_chk._on_click(None))
 
     tk.Frame(sidebar, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(S(18), S(16)))
-    section_caption("Hardware")
+    section_caption("System Tools")
 
-    bt_status_lbl = ttk.Label(
+    tools_status_lbl = ttk.Label(
         sidebar,
-        text="Reset Intel Wireless Bluetooth & bthserv",
+        text="Reset Bluetooth driver or Windows icon cache",
         style="CardSub.TLabel",
     )
 
     def _on_bt_click() -> None:
         if is_bluetooth_restarting():
             return
-        bt_btn.config(state="disabled", text="Restarting Bluetooth...")
-        bt_status_lbl.config(text="Running elevated driver reset...", foreground=TEXT_MUTED)
+        bt_btn.config(state="disabled", text="Restarting...")
+        tools_status_lbl.config(text="Running elevated Bluetooth reset...", foreground=TEXT_MUTED)
 
         def _done(ok: bool, msg: str) -> None:
             def _ui_update() -> None:
                 try:
-                    bt_btn.config(state="normal", text="Restart Bluetooth Driver")
-                    bt_status_lbl.config(
-                        text="Driver restarted & audio reconnected" if ok else msg,
+                    bt_btn.config(state="normal", text="Restart Bluetooth")
+                    tools_status_lbl.config(
+                        text="Bluetooth restarted & audio reconnected" if ok else msg,
                         foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
                     )
                 except Exception:
@@ -383,16 +384,57 @@ def _run_control_center(daemon: Any) -> None:
 
         restart_bluetooth_driver(daemon=daemon, on_complete=_done)
 
+    def _on_icon_cache_click() -> None:
+        if is_icon_cache_resetting():
+            return
+        icon_btn.config(state="disabled", text="Resetting...")
+        tools_status_lbl.config(text="Clearing icon cache & restarting Explorer...", foreground=TEXT_MUTED)
+
+        def _done(ok: bool, msg: str) -> None:
+            def _ui_update() -> None:
+                try:
+                    icon_btn.config(state="normal", text="Reset Icon Cache")
+                    tools_status_lbl.config(
+                        text="Icon cache reset & Explorer restarted" if ok else msg,
+                        foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
+                    )
+                except Exception:
+                    pass
+            try:
+                root.after(0, _ui_update)
+            except Exception:
+                pass
+
+        reset_icon_cache(daemon=daemon, on_complete=_done)
+
+    tools_row = tk.Frame(sidebar, bg=CARD_COLOR)
+    tools_row.pack(fill=tk.X, pady=(0, S(6)))
+    tools_row.grid_columnconfigure(0, weight=1, uniform="tools")
+    tools_row.grid_columnconfigure(1, weight=1, uniform="tools")
+
     bt_btn = create_modern_btn(
-        sidebar,
-        "Restart Bluetooth Driver",
+        tools_row,
+        "Restart Bluetooth",
         _on_bt_click,
         primary=False,
         accent_color=ACCENT_COLOR,
         accent_hover=ACCENT_HOVER,
     )
-    bt_btn.pack(fill=tk.X, pady=(0, S(6)))
-    bt_status_lbl.pack(anchor=tk.W)
+    bt_btn.config(padx=S(6))
+    bt_btn.grid(row=0, column=0, sticky="ew", padx=(0, S(4)))
+
+    icon_btn = create_modern_btn(
+        tools_row,
+        "Reset Icon Cache",
+        _on_icon_cache_click,
+        primary=False,
+        accent_color=ACCENT_COLOR,
+        accent_hover=ACCENT_HOVER,
+    )
+    icon_btn.config(padx=S(6))
+    icon_btn.grid(row=0, column=1, sticky="ew", padx=(S(4), 0))
+
+    tools_status_lbl.pack(anchor=tk.W)
 
     # Footer: stop hotkey hint + version
     footer = tk.Frame(sidebar, bg=CARD_COLOR)
