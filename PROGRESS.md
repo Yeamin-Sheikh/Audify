@@ -6,12 +6,37 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-18
+- **Last updated:** 2026-10-21
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-21, v2.9.2 WASAPI audio client crash fix and multi-driver fallback
+
+**Duration:** ~10m
+**Status:** Done
+
+#### What changed
+- Removed unconditional module-level `pygame.mixer.pre_init()` and `pygame.mixer.init()` calls at lines 52-53 of `audify/engine.py` that crashed `Audify.exe` on import whenever Windows WASAPI had not finished initializing at startup or when no audio output device was active.
+- Added `TTSDaemon._ensure_mixer(retries, force_reinit)` with `threading.Lock` and automatic driver fallback across default SDL, `wasapi`, `directsound`, and `winmm` at `(24000, 1, 512)` and `(48000, 2, 1024)`.
+- Guarded all `self._tts_channel` accesses (`set_volume`, `_halt_channel`, `pause_audio`, `resume_audio`, `check_pause_and_wait`) when no audio device is connected.
+- Added lazy mixer retry (`retries=3`) at the start of `_speak()` and mid-playback `pygame.error` recovery (`force_reinit=True`) so unplugging headphones or switching outputs mid-sentence reinitializes the mixer and resumes cleanly.
+- Added an `audio-mixer` fallback test to `audify/__main__.py` (`--selftest`).
+
+#### Files touched
+- `audify/engine.py`, removed import-time `pygame.mixer.init()`, added `_ensure_mixer()` with `wasapi`/`directsound`/`winmm` fallback, and added mid-playback device recovery.
+- `audify/__main__.py`, added `audio-mixer` multi-driver verification to `--selftest`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.2`.
+
+#### Issues found
+- `audify/engine.py` line 53 called `pygame.mixer.init()` unconditionally at import time, raising `pygame.error: WASAPI can't initialize audio client:` when launched via Windows Startup before the default WASAPI endpoint was ready or when audio output devices were temporarily disconnected.
+
+#### Next steps
+- Rebuild `Audify.exe` and `Setup_Audify_2.9.2.exe`, run `--selftest`, install to `%LOCALAPPDATA%\Programs\Audify\`, and publish GitHub release `v2.9.2`.
+
+---
 
 ### 2026-10-18, v2.9.1 native Win32 hotkey and copy shortcut fix
 

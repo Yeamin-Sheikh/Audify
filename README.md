@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.1.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.2.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -194,6 +194,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.2
+
+- **Resilient WASAPI audio initialization and fallback**: moved `pygame.mixer.init()` out of module import time into `TTSDaemon._ensure_mixer()` with automatic multi-driver fallback across `wasapi`, `directsound`, and `winmm` at both `24kHz` mono and `48kHz` stereo. Prevents the `pygame.error: WASAPI can't initialize audio client:` startup crash when Windows boots before the audio endpoint is ready or when headphones/monitors are disconnected, and self-heals mid-session if the active output device changes.
 
 ### v2.9.1
 

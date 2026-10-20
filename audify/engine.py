@@ -48,10 +48,6 @@ try:
 except Exception:
     pass
 
-# Edge TTS delivers 24kHz mono audio; matching the mixer avoids any resampling
-pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
-pygame.mixer.init()
-
 
 class TTSDaemon:
     """Background daemon that converts queued text to speech via Edge TTS."""
@@ -63,9 +59,11 @@ class TTSDaemon:
         self.is_paused: bool = False
         self.current_code_blocks: list[str] = []
 
-        # Thread-safe config lock
+        # Thread-safe locks
         self._config_lock = threading.Lock()
+        self._mixer_lock = threading.Lock()
         self._save_timer: threading.Timer | None = None
+        self._tts_channel: pygame.mixer.Channel | None = None
 
         # Wispr Flow heuristic -- tracks when the user last triggered a manual copy or click
         self.last_ctrl_c_time: float = 0.0
@@ -112,10 +110,9 @@ class TTSDaemon:
             except Exception:
                 pass
 
-        # Apply saved volume on startup
-        pygame.mixer.set_num_channels(4)
-        self._tts_channel = pygame.mixer.Channel(0)
-        self._tts_channel.set_volume(self.config.get("volume", 1.0))
+        # Initialize audio mixer non-fatally (if Windows Audio / WASAPI is still
+        # starting up at login, _ensure_mixer will retry lazily when speech begins)
+        self._ensure_mixer(retries=1)
 
         # Layer 1: Win32 hardware key/mouse state poller (works in Administrator windows
         # where UIPI blocks WH_KEYBOARD_LL, and never suffers from stuck keys or sleep unhooking)
@@ -141,6 +138,69 @@ class TTSDaemon:
     def _start_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    # -- Audio mixer management (WASAPI / DirectSound / WinMM fallback) ----
+
+    def _ensure_mixer(
+        self,
+        retries: int = 1,
+        force_reinit: bool = False,
+    ) -> pygame.mixer.Channel | None:
+        """Initialize or recover pygame.mixer with multi-driver fallback.
+
+        Windows WASAPI can fail with ``WASAPI can't initialize audio client:`` when:
+        - Audify starts at Windows login before the Windows Audio endpoint is ready
+        - Headphones/Bluetooth/HDMI audio outputs are unplugged or switching
+        - Another application holds exclusive mode on the default endpoint
+
+        Tries default SDL driver first, then explicitly falls back across
+        ``wasapi``, ``directsound``, and ``winmm`` with both 24kHz mono and
+        48kHz stereo configurations. Never raises an unhandled exception.
+        """
+        with self._mixer_lock:
+            if not force_reinit and pygame.mixer.get_init() is not None and self._tts_channel is not None:
+                return self._tts_channel
+
+            drivers: tuple[str | None, ...] = (None, "wasapi", "directsound", "winmm")
+            specs: tuple[tuple[int, int, int], ...] = (
+                (24000, 1, 512),
+                (48000, 2, 1024),
+            )
+            last_err: Exception | None = None
+
+            for attempt in range(max(1, retries)):
+                for driver in drivers:
+                    for freq, chans, buf in specs:
+                        try:
+                            if driver is None:
+                                os.environ.pop("SDL_AUDIODRIVER", None)
+                            else:
+                                os.environ["SDL_AUDIODRIVER"] = driver
+                            try:
+                                pygame.mixer.quit()
+                            except Exception:
+                                pass
+                            pygame.mixer.init(
+                                frequency=freq,
+                                size=-16,
+                                channels=chans,
+                                buffer=buf,
+                            )
+                            if pygame.mixer.get_init() is not None:
+                                self._tts_channel = pygame.mixer.Channel(0)
+                                with self._config_lock:
+                                    raw_vol = float(self.config.get("volume", 1.0))
+                                vol = raw_vol / 100.0 if raw_vol > 1.0 else raw_vol
+                                self._tts_channel.set_volume(max(0.0, min(1.0, vol)))
+                                return self._tts_channel
+                        except Exception as e:
+                            last_err = e
+                if attempt + 1 < retries:
+                    time.sleep(0.35)
+
+            self._tts_channel = None
+            print(f"[WARN] Audio mixer initialization deferred (no active audio endpoint): {last_err}")
+            return None
 
     # -- Hotkey / mouse callbacks ------------------------------------------
 
@@ -238,7 +298,12 @@ class TTSDaemon:
         """Change immediate mixer volume (0.0 to 1.0) and save to config."""
         with self._config_lock:
             self.config["volume"] = vol
-        self._tts_channel.set_volume(vol)
+        ch = self._tts_channel or self._ensure_mixer(retries=1)
+        if ch is not None:
+            try:
+                ch.set_volume(vol)
+            except Exception:
+                pass
         self._debounced_save()
         self._notify_state_change()
 
@@ -266,24 +331,30 @@ class TTSDaemon:
         self._halt_channel()
 
     def _halt_channel(self) -> None:
-        try:
-            self._tts_channel.stop()
-        except Exception:
-            pass
+        ch = self._tts_channel
+        if ch is not None:
+            try:
+                ch.stop()
+            except Exception:
+                pass
 
     def pause_audio(self) -> None:
         """Pause any currently-playing audio."""
-        try:
-            self._tts_channel.pause()
-        except Exception:
-            pass
+        ch = self._tts_channel
+        if ch is not None:
+            try:
+                ch.pause()
+            except Exception:
+                pass
 
     def resume_audio(self) -> None:
         """Resume any currently-paused audio."""
-        try:
-            self._tts_channel.unpause()
-        except Exception:
-            pass
+        ch = self._tts_channel
+        if ch is not None:
+            try:
+                ch.unpause()
+            except Exception:
+                pass
 
     def check_pause_and_wait(self, stop_generation: int | None = None) -> bool:
         """
@@ -293,29 +364,33 @@ class TTSDaemon:
         if not self.is_paused:
             return False
 
+        ch = self._tts_channel
         # Pause playback if it's currently busy
-        try:
-            if self._tts_channel.get_busy():
-                self._tts_channel.pause()
-        except Exception:
-            pass
+        if ch is not None:
+            try:
+                if ch.get_busy():
+                    ch.pause()
+            except Exception:
+                pass
 
         while self.is_paused:
             stopped = stop_generation is not None and stop_generation != self._stop_generation
             if stopped or not self.q.empty():
                 # New text in queue, we must abort current playback
-                try:
-                    self._tts_channel.stop()
-                except Exception:
-                    pass
+                if ch is not None:
+                    try:
+                        ch.stop()
+                    except Exception:
+                        pass
                 return True
             time.sleep(0.05)
 
         # Unpaused, resume playback if it was busy
-        try:
-            self._tts_channel.unpause()
-        except Exception:
-            pass
+        if ch is not None:
+            try:
+                ch.unpause()
+            except Exception:
+                pass
 
         return False
 
@@ -524,7 +599,15 @@ class TTSDaemon:
         with self._config_lock:
             voice = self.config.get("voice", "en-US-JennyNeural")
             rate = self.config.get("rate", "+50%")
-        frequency, _size, channels = pygame.mixer.get_init()
+
+        channel = self._ensure_mixer(retries=3)
+        init_fmt = pygame.mixer.get_init()
+        if channel is None or init_fmt is None:
+            self._notify_error(
+                "Audio output device unavailable. Connect speakers or headphones and try again."
+            )
+            return None
+        frequency, _size, channels = init_fmt
 
         chunks = self._split_text(text)
 
@@ -535,7 +618,6 @@ class TTSDaemon:
         )
         session.start()
 
-        channel = self._tts_channel
         ready: deque[list] = deque()  # [chunk_index, bytearray] not yet handed to the channel
         playing: list[tuple[pygame.mixer.Sound, int]] = []  # sounds given to the channel, in order
         shown_chunk = -1
@@ -603,19 +685,32 @@ class TTSDaemon:
 
                 # Keep the channel's single queue slot filled for gapless playback.
                 # Starting from silence, wait for a 50ms cushion so playback never stutters.
-                idle = not channel.get_busy()
-                cushioned = decoded_all or len(ready) > 1 or (ready and len(ready[0][1]) >= start_cushion)
-                if ready and ((idle and cushioned) or (not idle and channel.get_queue() is None)):
-                    index, data = ready.popleft()
-                    sound = pygame.mixer.Sound(buffer=bytes(data))
-                    if channel.get_busy():
-                        channel.queue(sound)
-                    else:
-                        channel.play(sound)
-                    playing.append((sound, index))
+                try:
+                    idle = not channel.get_busy()
+                    cushioned = decoded_all or len(ready) > 1 or (ready and len(ready[0][1]) >= start_cushion)
+                    if ready and ((idle and cushioned) or (not idle and channel.get_queue() is None)):
+                        index, data = ready.popleft()
+                        sound = pygame.mixer.Sound(buffer=bytes(data))
+                        if channel.get_busy():
+                            channel.queue(sound)
+                        else:
+                            channel.play(sound)
+                        playing.append((sound, index))
+                    current = channel.get_sound()
+                    still_busy = channel.get_busy()
+                except pygame.error:
+                    # Audio output endpoint changed or dropped mid-session; re-init mixer
+                    channel = self._ensure_mixer(retries=2, force_reinit=True)
+                    new_fmt = pygame.mixer.get_init()
+                    if channel is None or new_fmt is None:
+                        self._notify_error("Audio output device disconnected during playback.")
+                        return None
+                    if (new_fmt[0], new_fmt[2]) != (frequency, channels):
+                        restarting = True
+                        return unread_text()
+                    continue
 
                 # Status follows what is audible, not what has been downloaded
-                current = channel.get_sound()
                 for sound, index in playing:
                     if sound is current and index != shown_chunk:
                         shown_chunk = index
@@ -626,7 +721,7 @@ class TTSDaemon:
                 if len(playing) > 8:
                     del playing[:-4]
 
-                if decoded_all and not ready and not channel.get_busy():
+                if decoded_all and not ready and not still_busy:
                     return None
         finally:
             session.cancel()

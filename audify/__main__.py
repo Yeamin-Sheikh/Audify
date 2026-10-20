@@ -64,7 +64,37 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"hotkeys: FAILED {e!r}")
 
-    # 4. Verify live streaming + decoding pipeline
+    # 4. Verify resilient audio mixer import (no import-time WASAPI crash) + multi-driver init
+    try:
+        import os
+        import pygame
+        import audify.engine  # noqa: F401 -- must never call pygame.mixer.init() at import time
+
+        # Simulate WASAPI failure on first attempt by setting an invalid SDL_AUDIODRIVER,
+        # then verify fallback drivers ("wasapi", "directsound", "winmm") succeed.
+        os.environ["SDL_AUDIODRIVER"] = "nonexistent_driver"
+        mixer_fmt = None
+        active_drv = None
+        for drv in ("wasapi", "directsound", "winmm"):
+            try:
+                os.environ["SDL_AUDIODRIVER"] = drv
+                pygame.mixer.quit()
+                pygame.mixer.init(frequency=24000, size=-16, channels=1, buffer=512)
+                mixer_fmt = pygame.mixer.get_init()
+                if mixer_fmt is not None:
+                    active_drv = drv
+                    break
+            except Exception:
+                pass
+        os.environ.pop("SDL_AUDIODRIVER", None)
+        if mixer_fmt is None:
+            raise RuntimeError("All audio drivers (wasapi, directsound, winmm) failed to initialize")
+        lines.append(f"audio-mixer: ok (driver={active_drv}, format={mixer_fmt})")
+    except Exception as e:
+        ok = False
+        lines.append(f"audio-mixer: FAILED {e!r}")
+
+    # 5. Verify live streaming + decoding pipeline
     try:
         from audify.playback import SpeechSession
 
