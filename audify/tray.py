@@ -13,6 +13,7 @@ from pystray import Menu
 from pystray import MenuItem as item
 
 from audify import __version__
+from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
 from audify.clipboard import get_clipboard_text
 from audify.config import (
     HISTORY_FILE,
@@ -242,6 +243,10 @@ def setup_tray() -> None:
             target=show_dictionary_ui, args=(daemon,), daemon=True
         ).start()
 
+    def on_restart_bluetooth(icon: pystray.Icon, item_action: item) -> None:
+        """Run the elevated Intel Wireless Bluetooth driver restart workflow."""
+        restart_bluetooth_driver(daemon=daemon)
+
     def on_exit(icon: pystray.Icon, item_action: item) -> None:
         daemon.on_state_change = None
         daemon.stop_audio()
@@ -360,6 +365,11 @@ def setup_tray() -> None:
                 checked=lambda i: daemon.config.get("skip_code_blocks", True),
             ),
             Menu.SEPARATOR,
+            item(
+                lambda text: "Restarting Bluetooth..." if is_bluetooth_restarting() else "Restart Bluetooth",
+                on_restart_bluetooth,
+                enabled=lambda i: not is_bluetooth_restarting(),
+            ),
             item("Control Center...", on_open_settings),
             item("Quit Audify", on_exit),
         ),

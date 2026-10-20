@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from audify.engine import TTSDaemon
 
 from audify import __version__
+from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
 from audify.config import VOICES, RATES, remove_rule, save_config, set_rule
 from audify.gui.widgets import (
     FluentSlider,
@@ -220,12 +221,12 @@ def _run_control_center(daemon: Any) -> None:
 
     root.update_idletasks()
     _apply_dark_title_bar(root)
-    width, height = S(1020), S(640)
+    width, height = S(1020), S(660)
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.resizable(True, True)
-    root.minsize(S(880), S(560))
+    root.minsize(S(880), S(600))
 
     _configure_styles(root, S)
 
@@ -349,6 +350,49 @@ def _run_control_center(daemon: Any) -> None:
     skip_desc.pack(anchor=tk.W)
     for w in (skip_row, skip_text, skip_title, skip_desc):
         w.bind("<Button-1>", lambda e: skip_chk._on_click(None))
+
+    tk.Frame(sidebar, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(S(18), S(16)))
+    section_caption("Hardware")
+
+    bt_status_lbl = ttk.Label(
+        sidebar,
+        text="Reset Intel Wireless Bluetooth & bthserv",
+        style="CardSub.TLabel",
+    )
+
+    def _on_bt_click() -> None:
+        if is_bluetooth_restarting():
+            return
+        bt_btn.config(state="disabled", text="Restarting Bluetooth...")
+        bt_status_lbl.config(text="Running elevated driver reset...", foreground=TEXT_MUTED)
+
+        def _done(ok: bool, msg: str) -> None:
+            def _ui_update() -> None:
+                try:
+                    bt_btn.config(state="normal", text="Restart Bluetooth Driver")
+                    bt_status_lbl.config(
+                        text="Driver restarted & audio reconnected" if ok else msg,
+                        foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
+                    )
+                except Exception:
+                    pass
+            try:
+                root.after(0, _ui_update)
+            except Exception:
+                pass
+
+        restart_bluetooth_driver(daemon=daemon, on_complete=_done)
+
+    bt_btn = create_modern_btn(
+        sidebar,
+        "Restart Bluetooth Driver",
+        _on_bt_click,
+        primary=False,
+        accent_color=ACCENT_COLOR,
+        accent_hover=ACCENT_HOVER,
+    )
+    bt_btn.pack(fill=tk.X, pady=(0, S(6)))
+    bt_status_lbl.pack(anchor=tk.W)
 
     # Footer: stop hotkey hint + version
     footer = tk.Frame(sidebar, bg=CARD_COLOR)

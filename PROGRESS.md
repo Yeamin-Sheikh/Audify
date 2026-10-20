@@ -13,6 +13,24 @@
 
 ## Progress log
 
+### 2026-10-21, v2.9.3 built-in Intel Wireless Bluetooth driver restarter
+
+**Duration:** ~10m
+**Status:** Done
+
+#### What changed
+- Added `audify/bluetooth.py` implementing the 4-step Intel Wireless Bluetooth reset workflow (`pnputil /restart-device`, `Disable-PnpDevice`/`Enable-PnpDevice`, `bthserv` service restart, and `pnputil /scan-devices`) with `ShellExecuteExW` (`runas`) elevation tracking and automatic `pygame.mixer` rebinding once Bluetooth audio reconnects.
+- Added **Restart Bluetooth** to the system tray context menu in `audify/tray.py` and a **Restart Bluetooth Driver** button under the **Hardware** section of the Control Center sidebar in `audify/gui/control_center.py`.
+- Bumped version to `2.9.3`.
+
+#### Files touched
+- `audify/bluetooth.py`, new module for elevated Bluetooth driver reset and audio endpoint reconnection.
+- `audify/tray.py`, added **Restart Bluetooth** menu item.
+- `audify/gui/control_center.py`, added **Hardware -> Restart Bluetooth Driver** button and status label.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.3`.
+
+---
+
 ### 2026-10-21, v2.9.2 WASAPI audio client crash fix and multi-driver fallback
 
 **Duration:** ~10m

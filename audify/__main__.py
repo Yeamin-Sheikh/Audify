@@ -94,7 +94,24 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"audio-mixer: FAILED {e!r}")
 
-    # 5. Verify live streaming + decoding pipeline
+    # 5. Verify Bluetooth driver restarter module
+    try:
+        from audify.bluetooth import (
+            DEFAULT_BT_INSTANCE_ID,
+            SHELLEXECUTEINFOW,
+            _BATCH_SCRIPT,
+            is_bluetooth_restarting,
+        )
+
+        if DEFAULT_BT_INSTANCE_ID not in _BATCH_SCRIPT or is_bluetooth_restarting():
+            raise RuntimeError("Bluetooth restarter configuration invalid")
+        _ = ctypes.sizeof(SHELLEXECUTEINFOW)
+        lines.append(f"bluetooth-restarter: ok ({DEFAULT_BT_INSTANCE_ID})")
+    except Exception as e:
+        ok = False
+        lines.append(f"bluetooth-restarter: FAILED {e!r}")
+
+    # 6. Verify live streaming + decoding pipeline
     try:
         from audify.playback import SpeechSession
 
