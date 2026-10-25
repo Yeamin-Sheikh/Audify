@@ -222,12 +222,12 @@ def _run_control_center(daemon: Any) -> None:
 
     root.update_idletasks()
     _apply_dark_title_bar(root)
-    width, height = S(1020), S(660)
+    width, height = S(1020), S(690)
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.resizable(True, True)
-    root.minsize(S(880), S(600))
+    root.minsize(S(880), S(630))
 
     _configure_styles(root, S)
 
@@ -434,12 +434,62 @@ def _run_control_center(daemon: Any) -> None:
     icon_btn.config(padx=S(6))
     icon_btn.grid(row=0, column=1, sticky="ew", padx=(S(4), 0))
 
+    def _on_dictate_click() -> None:
+        stt = getattr(daemon, "stt", None)
+        if stt is None or stt.is_transcribing:
+            return
+        if not stt.is_recording:
+            stt.start_dictation()
+            dictate_btn.config(text="Stop & Transcribe")
+            tools_status_lbl.config(text="Listening... speak now, then click Stop", foreground=ACCENT_COLOR)
+        else:
+            dictate_btn.config(state="disabled", text="Transcribing...")
+            tools_status_lbl.config(text="Bark 3.0 Clean transcribing...", foreground=TEXT_MUTED)
+
+            def _done(ok: bool, msg: str) -> None:
+                def _ui_update() -> None:
+                    try:
+                        dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
+                        preview = msg if len(msg) <= 42 else msg[:39] + "..."
+                        tools_status_lbl.config(
+                            text=f"Dictated: {preview}" if ok else msg,
+                            foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    root.after(0, _ui_update)
+                except Exception:
+                    pass
+
+            stt.stop_and_transcribe(on_complete=_done)
+
+    dictate_btn = create_modern_btn(
+        sidebar,
+        "Start Dictation (Bark 3.0)",
+        _on_dictate_click,
+        primary=True,
+        accent_color=ACCENT_COLOR,
+        accent_hover=ACCENT_HOVER,
+    )
+    dictate_btn.pack(fill=tk.X, pady=(0, S(6)))
+
     tools_status_lbl.pack(anchor=tk.W)
 
     # Footer: stop hotkey hint + version
     footer = tk.Frame(sidebar, bg=CARD_COLOR)
     footer.pack(side=tk.BOTTOM, fill=tk.X)
     tk.Frame(footer, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(0, S(14)))
+    dict_hotkey_row = tk.Frame(footer, bg=CARD_COLOR)
+    dict_hotkey_row.pack(fill=tk.X, pady=(0, S(6)))
+    ttk.Label(dict_hotkey_row, text="Dictate (Bark 3.0)", style="CardSub.TLabel").pack(side=tk.LEFT)
+    dict_hotkey = str(daemon.config.get("dictation_hotkey", "ctrl+alt+d"))
+    tk.Label(
+        dict_hotkey_row,
+        text="+".join(part.strip().capitalize() for part in dict_hotkey.split("+")),
+        bg=FIELD_COLOR, fg=TEXT_COLOR, font=("Segoe UI Semibold", 8),
+        padx=S(8), pady=S(2), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR,
+    ).pack(side=tk.RIGHT)
     hotkey_row = tk.Frame(footer, bg=CARD_COLOR)
     hotkey_row.pack(fill=tk.X, pady=(0, S(10)))
     ttk.Label(hotkey_row, text="Stop playback", style="CardSub.TLabel").pack(side=tk.LEFT)
@@ -730,6 +780,15 @@ def _run_control_center(daemon: Any) -> None:
             cur_skip = daemon.config.get("skip_code_blocks", True)
             if skip_var.get() != cur_skip:
                 skip_var.set(cur_skip)
+
+            stt = getattr(daemon, "stt", None)
+            if stt is not None:
+                if stt.is_transcribing:
+                    dictate_btn.config(state="disabled", text="Transcribing...")
+                elif stt.is_recording:
+                    dictate_btn.config(state="normal", text="Stop & Transcribe")
+                else:
+                    dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
 
             root.after(1000, sync_gui_values)
         except tk.TclError:

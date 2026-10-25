@@ -193,6 +193,7 @@ DEFAULT_CONFIG: dict = {
     "volume": 1.0,
     "skip_code_blocks": True,
     "stop_hotkey": "ctrl+alt+s",
+    "dictation_hotkey": "ctrl+alt+d",
     "pronunciation_dict": {},
     # Built-in rules the user deleted; never re-added on startup
     "removed_default_rules": [],

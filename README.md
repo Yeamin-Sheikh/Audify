@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.4.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.5.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -115,6 +115,7 @@ Download **`Audify.exe`** and run it from anywhere.
 | Read text aloud | Copy it with `Ctrl+C` or `Ctrl+Shift+C` |
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
+| Dictate speech to text (Bark 3.0 Clean) | `Ctrl+Alt+D` to start speaking, `Ctrl+Alt+D` again to transcribe and auto-paste |
 | Change voice | Tray -> **Voice** |
 | Change speed | Tray -> **Speed** |
 | Change volume | Tray -> **Volume** |
@@ -180,6 +181,7 @@ audify/
 ├── __main__.py              Entry point, single-instance guard, --selftest
 ├── engine.py                Reader: clipboard queue, playback, speed/voice changes
 ├── playback.py              Low-latency Edge TTS streaming, concurrent chunk prefetch, MP3->PCM decode
+├── stt.py                   Speech-to-Text dictation engine powered by Underdog Bark 3.0 Clean
 ├── updater.py               Weekly PyPI update checker for edge-tts
 ├── clipboard.py             Event-driven Win32 clipboard listener and native RegisterHotKey
 ├── config.py                Settings, voices, speeds, crash-safe saving
@@ -194,6 +196,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.5
+
+- **Speech-to-Text dictation with Underdog Bark 3.0 Clean**: added `audify/stt.py` integrating `ConwayResearch/Underdog-Bark-3.0-Clean` (`ParakeetForTDT` 0.6B with built-in disfluency removal that strips "um", "uh", and false starts). Press `Ctrl+Alt+D` (or click **Start Dictation (Bark 3.0)** in the tray menu or Control Center) to record 16 kHz microphone audio via zero-dependency Win32 `winmm.dll`, and press `Ctrl+Alt+D` again to transcribe and auto-paste directly into the focused window without triggering TTS readback. Unpacked weights are cached on disk (`%LOCALAPPDATA%\Audify\bark_clean\cached_hf`) and the sidecar worker unloads after 3 minutes of inactivity so Audify returns to ~45 MB RAM when idle.
 
 ### v2.9.4
 

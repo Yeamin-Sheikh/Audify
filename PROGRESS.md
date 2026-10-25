@@ -6,12 +6,35 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-21
+- **Last updated:** 2026-10-25
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-25, v2.9.5 Speech-to-Text dictation with Underdog Bark 3.0 Clean
+
+**Duration:** ~20m
+**Status:** Done
+
+#### What changed
+- Added `audify/stt.py` integrating **Underdog Bark 3.0 Clean** (`ConwayResearch/Underdog-Bark-3.0-Clean`, 171 MB ANS-compressed `ParakeetForTDT` 0.6B with built-in disfluency removal that strips "um", "uh", and false starts).
+- Implemented `Win32MicRecorder` using Windows Multimedia API (`winmm.dll` `waveInOpen`) via `ctypes` for zero-dependency 16 kHz 16-bit mono PCM capture.
+- Implemented `BarkCleanController` with background model pre-warming while the user speaks, disk caching of unpacked `model.safetensors` in `%LOCALAPPDATA%\Audify\bark_clean\cached_hf`, automatic unloading after 3 minutes of inactivity, and clipboard auto-paste (`Ctrl+V`) that suppresses TTS self-readback.
+- Added global hotkey `Ctrl+Alt+D` (`dictation_hotkey`) in `audify/config.py`, `audify/clipboard.py`, and `audify/engine.py`, an emerald-green `"recording"` tray icon state and **Start Dictation (Bark 3.0)** menu item in `audify/tray.py`, and a **Start Dictation (Bark 3.0)** button + `Ctrl+Alt+D` shortcut badge in `audify/gui/control_center.py`.
+- Bumped version to `2.9.5`.
+
+#### Files touched
+- `audify/stt.py`, new Speech-to-Text module (`Win32MicRecorder`, `BarkCleanController`, `set_clipboard_text`, `send_ctrl_v`).
+- `audify/config.py`, added `"dictation_hotkey": "ctrl+alt+d"`.
+- `audify/clipboard.py`, added `HOTKEY_ID_DICTATION` (`WM_HOTKEY`) registration alongside `HOTKEY_ID_STOP`.
+- `audify/engine.py`, wired `self.stt = BarkCleanController(daemon=self)` and rising-edge `Ctrl+Alt+D` detection.
+- `audify/tray.py`, added `"recording"` icon gradient, **Start Dictation (Bark 3.0)** / **Stop & Transcribe** menu item, and worker shutdown on exit.
+- `audify/gui/control_center.py`, added **Start Dictation (Bark 3.0)** button and `Ctrl+Alt+D` footer badge.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.5`.
+
+---
 
 ### 2026-10-21, v2.9.4 built-in Windows Icon Cache Reset utility
 

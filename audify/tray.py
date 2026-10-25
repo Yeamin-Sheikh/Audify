@@ -75,13 +75,14 @@ _SUPERSAMPLE = 4
 
 # (top colour, bottom colour) of the disc gradient per state
 _DISC_COLORS = {
-    "ready": ((99, 102, 241), (139, 92, 246)),     # indigo -> violet
-    "speaking": ((56, 189, 248), (99, 102, 241)),  # sky -> indigo, brighter while talking
-    "paused": ((120, 120, 128), (72, 72, 80)),     # neutral grey
+    "ready": ((99, 102, 241), (139, 92, 246)),      # indigo -> violet
+    "speaking": ((56, 189, 248), (99, 102, 241)),   # sky -> indigo, brighter while talking
+    "recording": ((16, 185, 129), (5, 150, 105)),   # emerald green while recording dictation
+    "paused": ((120, 120, 128), (72, 72, 80)),      # neutral grey
 }
 
-# Crossbar wave amplitude (fraction of icon size): livelier while speaking
-_WAVE_AMPLITUDE = {"ready": 0.027, "speaking": 0.05}
+# Crossbar wave amplitude (fraction of icon size): livelier while speaking/recording
+_WAVE_AMPLITUDE = {"ready": 0.027, "speaking": 0.05, "recording": 0.055}
 
 _icon_cache: dict[str, Image.Image] = {}
 
@@ -176,6 +177,11 @@ def _hotkey_display_name(daemon: TTSDaemon) -> str:
     return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
 
 
+def _dictation_hotkey_display_name(daemon: TTSDaemon) -> str:
+    hotkey = str(daemon.config.get("dictation_hotkey", "ctrl+alt+d"))
+    return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
+
+
 # -- Main setup ---------------------------------------------------------------
 
 def setup_tray() -> None:
@@ -193,6 +199,8 @@ def setup_tray() -> None:
     # -- State -> icon, tooltip and menu ---------------------------------------
 
     def current_state() -> str:
+        if daemon.stt.is_recording:
+            return "recording"
         if daemon.is_paused:
             return "paused"
         return "speaking" if daemon.is_speaking else "ready"
@@ -236,6 +244,10 @@ def setup_tray() -> None:
         if text.strip():
             daemon.q.put(text)
 
+    def on_toggle_dictation(icon: pystray.Icon, item_action: item) -> None:
+        """Toggle Underdog Bark 3.0 Clean speech-to-text dictation."""
+        daemon.toggle_dictation()
+
     def on_toggle_skip_code(icon: pystray.Icon, item_action: item) -> None:
         daemon.toggle_skip_code_blocks()
 
@@ -255,6 +267,7 @@ def setup_tray() -> None:
     def on_exit(icon: pystray.Icon, item_action: item) -> None:
         daemon.on_state_change = None
         daemon.stop_audio()
+        daemon.stt.shutdown()
         daemon.q.put(None)
         if os.path.exists(HISTORY_FILE):
             try:
@@ -350,6 +363,14 @@ def setup_tray() -> None:
                 enabled=lambda i: bool(daemon.last_spoken),
             ),
             item("Read Clipboard Now", on_read_clipboard),
+            item(
+                lambda text: (
+                    f"{'Stop & Transcribe' if daemon.stt.is_recording else ('Transcribing...' if daemon.stt.is_transcribing else 'Start Dictation (Bark 3.0)')}"
+                    f"\t{_dictation_hotkey_display_name(daemon)}"
+                ),
+                on_toggle_dictation,
+                enabled=lambda i: not daemon.stt.is_transcribing,
+            ),
             Menu.SEPARATOR,
             # Voice settings with the current value right-aligned
             item(

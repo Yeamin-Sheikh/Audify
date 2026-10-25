@@ -53,9 +53,15 @@ def _selftest(report_path: str) -> int:
         if not parsed:
             raise RuntimeError("parse_win32_hotkey('ctrl+alt+s') returned None")
         check_copy_keys()
-        listener = ClipboardListener(lambda _t: None, stop_hotkey="ctrl+alt+f12", on_stop_hotkey=lambda: None)
+        listener = ClipboardListener(
+            lambda _t: None,
+            stop_hotkey="ctrl+alt+f12",
+            on_stop_hotkey=lambda: None,
+            dictation_hotkey="ctrl+alt+f11",
+            on_dictation_hotkey=lambda: None,
+        )
         listener.start()
-        hotkey_ok = listener._hotkey_registered
+        hotkey_ok = listener._hotkey_registered and listener._dictation_hotkey_registered
         listener.stop()
         if not hotkey_ok:
             raise RuntimeError("Win32 RegisterHotKey failed on message window")
@@ -94,8 +100,9 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"audio-mixer: FAILED {e!r}")
 
-    # 5. Verify Bluetooth driver restarter and Icon Cache resetter modules
+    # 5. Verify Bluetooth driver restarter, Icon Cache resetter, and Bark 3.0 Clean STT
     try:
+        import os
         from audify.bluetooth import (
             DEFAULT_BT_INSTANCE_ID,
             SHELLEXECUTEINFOW,
@@ -103,13 +110,24 @@ def _selftest(report_path: str) -> int:
             is_bluetooth_restarting,
         )
         from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
+        from audify.stt import BarkCleanController, find_bark_python, get_bark_dir
 
         if DEFAULT_BT_INSTANCE_ID not in _BATCH_SCRIPT or is_bluetooth_restarting():
             raise RuntimeError("Bluetooth restarter configuration invalid")
         if is_icon_cache_resetting() or not callable(reset_icon_cache):
             raise RuntimeError("Icon cache resetter configuration invalid")
         _ = ctypes.sizeof(SHELLEXECUTEINFOW)
-        lines.append(f"system-tools: ok (bluetooth={DEFAULT_BT_INSTANCE_ID}, icon-cache=ready)")
+        bark_py = find_bark_python()
+        bark_dir = get_bark_dir()
+        model_bark = os.path.join(bark_dir, "model.bark")
+        if not bark_py or not os.path.isfile(model_bark):
+            raise RuntimeError(f"Bark 3.0 Clean runtime missing (py={bark_py}, model={model_bark})")
+        ctrl = BarkCleanController()
+        if ctrl.is_busy:
+            raise RuntimeError("BarkCleanController unexpectedly busy at init")
+        lines.append(
+            f"system-tools: ok (bluetooth={DEFAULT_BT_INSTANCE_ID}, icon-cache=ready, bark-3.0-clean={bark_py})"
+        )
     except Exception as e:
         ok = False
         lines.append(f"system-tools: FAILED {e!r}")

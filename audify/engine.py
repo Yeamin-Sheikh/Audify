@@ -32,6 +32,7 @@ from audify.clipboard import (
     parse_win32_hotkey,
 )
 from audify.playback import SpeechSession, prewarm_edge_tts, rate_to_speed
+from audify.stt import BarkCleanController
 from audify.updater import start_weekly_update_checker
 from audify.config import (
     CONFIG_FILE,
@@ -76,6 +77,17 @@ class TTSDaemon:
             ord("S"),
         )
 
+        # Parse dictation hotkey (default ctrl+alt+d) into Win32 modifiers + VK code
+        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "ctrl+alt+d"))
+        self._dictation_hotkey_parsed = parse_win32_hotkey(dictation_hotkey_str) or (
+            MOD_CONTROL | MOD_ALT,
+            ord("D"),
+        )
+        self._dictation_combo_was_down: bool = False
+
+        # Speech-to-Text controller powered by Underdog Bark 3.0 Clean
+        self.stt = BarkCleanController(daemon=self)
+
         # Persistent event loop for TTS
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._start_loop, daemon=True, name="tts-event-loop").start()
@@ -83,11 +95,13 @@ class TTSDaemon:
         # Pre-warm Sec-MS-GEC v2 token, shared TCPConnector, and DNS cache
         prewarm_edge_tts(self._loop)
 
-        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop_hotkey
+        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop & dictation hotkeys
         self._clip_listener = ClipboardListener(
             self._on_clipboard_change,
             stop_hotkey=stop_hotkey_str,
             on_stop_hotkey=self.stop_audio,
+            dictation_hotkey=dictation_hotkey_str,
+            on_dictation_hotkey=self.toggle_dictation,
         )
 
         # Tray icon (injected later)
@@ -217,8 +231,25 @@ class TTSDaemon:
             return False
         return True
 
+    def _is_dictation_combo_down(self) -> bool:
+        """Return True if the configured dictation hotkey (e.g. Ctrl+Alt+D) is physically held down."""
+        mods, vk = self._dictation_hotkey_parsed
+        if not is_vk_down(vk):
+            return False
+        if (mods & MOD_CONTROL) and not is_vk_down(VK_CONTROL):
+            return False
+        if (mods & MOD_ALT) and not is_vk_down(VK_MENU):
+            return False
+        if (mods & MOD_SHIFT) and not is_vk_down(VK_SHIFT):
+            return False
+        return True
+
+    def toggle_dictation(self) -> None:
+        """Toggle Bark 3.0 Clean microphone dictation on/off."""
+        self.stt.toggle_dictation()
+
     def _poll_input_state_loop(self) -> None:
-        """Poll Win32 GetAsyncKeyState every 15ms so copy/stop keys work even in Admin windows."""
+        """Poll Win32 GetAsyncKeyState every 15ms so copy/stop/dictation keys work even in Admin windows."""
         # Flush any pre-startup 0x0001 bits from key/mouse presses before Audify launched
         try:
             check_copy_keys()
@@ -230,6 +261,12 @@ class TTSDaemon:
                     self.last_ctrl_c_time = time.time()
                 if self._is_stop_combo_down():
                     self.stop_audio()
+                dict_down = self._is_dictation_combo_down()
+                if dict_down and not self._dictation_combo_was_down:
+                    self._dictation_combo_was_down = True
+                    self.toggle_dictation()
+                elif not dict_down:
+                    self._dictation_combo_was_down = False
             except Exception:
                 pass
             time.sleep(0.015)
@@ -246,6 +283,9 @@ class TTSDaemon:
             self.last_ctrl_c_time = time.time()
         elif self._is_stop_combo_down():
             self.stop_audio()
+        elif self._is_dictation_combo_down() and not self._dictation_combo_was_down:
+            self._dictation_combo_was_down = True
+            self.toggle_dictation()
 
     def on_mouse_click(
         self, x: int, y: int, button: pynput_mouse.Button, pressed: bool

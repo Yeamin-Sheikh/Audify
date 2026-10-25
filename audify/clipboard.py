@@ -34,6 +34,7 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 HOTKEY_ID_STOP = 1
+HOTKEY_ID_DICTATION = 2
 
 # Win32 Virtual-Key codes for direct physical state queries via GetAsyncKeyState
 VK_LBUTTON = 0x01
@@ -276,10 +277,14 @@ class ClipboardListener:
         on_text_change: Callable[[str], None],
         stop_hotkey: str = "ctrl+alt+s",
         on_stop_hotkey: Callable[[], None] | None = None,
+        dictation_hotkey: str = "ctrl+alt+d",
+        on_dictation_hotkey: Callable[[], None] | None = None,
     ) -> None:
         self.on_text_change = on_text_change
         self.stop_hotkey = stop_hotkey
         self.on_stop_hotkey = on_stop_hotkey
+        self.dictation_hotkey = dictation_hotkey
+        self.on_dictation_hotkey = on_dictation_hotkey
         self._hwnd: int | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -289,6 +294,7 @@ class ClipboardListener:
         self._last_text: str = ""
         self._last_update_time: float = 0.0
         self._hotkey_registered: bool = False
+        self._dictation_hotkey_registered: bool = False
 
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         """Win32 window procedure. Handles clipboard updates and native global hotkeys."""
@@ -296,6 +302,11 @@ class ClipboardListener:
             if wparam == HOTKEY_ID_STOP and self.on_stop_hotkey:
                 try:
                     self.on_stop_hotkey()
+                except Exception:
+                    pass
+            elif wparam == HOTKEY_ID_DICTATION and self.on_dictation_hotkey:
+                try:
+                    self.on_dictation_hotkey()
                 except Exception:
                     pass
             return 0
@@ -358,6 +369,13 @@ class ClipboardListener:
             if user32.RegisterHotKey(self._hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
                 self._hotkey_registered = True
 
+        # Register native Win32 global dictation hotkey (e.g. Ctrl+Alt+D) on this message pump
+        parsed_dict = parse_win32_hotkey(self.dictation_hotkey)
+        if parsed_dict and self.on_dictation_hotkey:
+            d_mods, d_vk = parsed_dict
+            if user32.RegisterHotKey(self._hwnd, HOTKEY_ID_DICTATION, d_mods | MOD_NOREPEAT, d_vk):
+                self._dictation_hotkey_registered = True
+
         # Snapshot current clipboard so we don't fire on startup
         try:
             self._last_text = get_clipboard_text()
@@ -377,6 +395,9 @@ class ClipboardListener:
         if self._hotkey_registered:
             user32.UnregisterHotKey(self._hwnd, HOTKEY_ID_STOP)
             self._hotkey_registered = False
+        if self._dictation_hotkey_registered:
+            user32.UnregisterHotKey(self._hwnd, HOTKEY_ID_DICTATION)
+            self._dictation_hotkey_registered = False
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.UnregisterClassW(self._class_name, h_inst)
 
