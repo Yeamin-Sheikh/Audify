@@ -6,6 +6,7 @@ import math
 import os
 import re
 import threading
+import time
 
 import pystray
 from PIL import Image, ImageDraw
@@ -14,10 +15,11 @@ from pystray import MenuItem as item
 
 from audify import __version__
 from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
-from audify.clipboard import get_clipboard_text
+from audify.clipboard import format_hotkey_label, get_clipboard_text
 from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
 from audify.config import (
     HISTORY_FILE,
+    STT_SILENCE_DELAYS,
     VOICES,
     RATES,
     VOLUMES,
@@ -136,6 +138,70 @@ def create_tray_icon(state: str) -> Image.Image:
     return icon
 
 
+_disc_base_cache: dict[str, Image.Image] = {}
+
+
+def create_recording_visualizer_icon(
+    levels: list[float], phase: float, transcribing: bool = False
+) -> Image.Image:
+    """Render an animated 5-bar audio visualizer inside the tray icon while dictating."""
+    n = _ICON_SIZE * 2  # 128px supersampled to 64px for fast 10 FPS rendering
+    palette_key = "transcribing" if transcribing else "recording"
+    if palette_key not in _disc_base_cache:
+        top, bottom = (
+            ((14, 165, 233), (37, 99, 235))
+            if transcribing
+            else _DISC_COLORS["recording"]
+        )
+        gradient = Image.new("RGBA", (1, n))
+        for y in range(n):
+            t = y / (n - 1)
+            gradient.putpixel(
+                (0, y),
+                tuple(int(a + (b - a) * t) for a, b in zip(top, bottom)) + (255,),
+            )
+        gradient = gradient.resize((n, n))
+        mask = Image.new("L", (n, n), 0)
+        inset = n * 0.025
+        ImageDraw.Draw(mask).ellipse((inset, inset, n - inset, n - inset), fill=255)
+        base = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        base.paste(gradient, (0, 0), mask)
+        _disc_base_cache[palette_key] = base
+
+    image = _disc_base_cache[palette_key].copy()
+    d = ImageDraw.Draw(image)
+    white = (255, 255, 255, 255)
+
+    num_bars = 5
+    bar_w = n * 0.095
+    gap = n * 0.055
+    total_w = num_bars * bar_w + (num_bars - 1) * gap
+    x0 = (n - total_w) / 2.0
+    cy = n / 2.0
+    max_half_h = n * 0.31
+    min_half_h = n * 0.075
+
+    for i in range(num_bars):
+        if transcribing:
+            eff = 0.25 + 0.65 * (0.5 + 0.5 * math.sin(phase * 6.5 - i * 0.85))
+        else:
+            idx = min(len(levels) - 1, i * 2) if levels else 0
+            lvl = levels[idx] if levels else 0.1
+            center_boost = 1.0 - 0.15 * abs(i - 2)
+            idle_osc = 0.18 + 0.14 * math.sin(phase * 5.0 + i * 1.1)
+            eff = max(idle_osc, min(1.0, lvl * center_boost * 1.45))
+
+        hh = min_half_h + eff * (max_half_h - min_half_h)
+        bx = x0 + i * (bar_w + gap)
+        d.rounded_rectangle(
+            (bx, cy - hh, bx + bar_w, cy + hh),
+            radius=bar_w / 2.0,
+            fill=white,
+        )
+
+    return image.resize((_ICON_SIZE, _ICON_SIZE), Image.Resampling.BILINEAR)
+
+
 # -- Helpers for dynamic menu labels ------------------------------------------
 
 def _voice_gender(label: str) -> str:
@@ -174,17 +240,22 @@ def _volume_display_name(daemon: TTSDaemon) -> str:
 
 def _hotkey_display_name(daemon: TTSDaemon) -> str:
     hotkey = str(daemon.config.get("stop_hotkey", "ctrl+alt+s"))
-    return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
+    return format_hotkey_label(hotkey)
 
 
 def _dictation_hotkey_display_name(daemon: TTSDaemon) -> str:
-    hotkey = str(daemon.config.get("dictation_hotkey", "ctrl+alt+d"))
-    return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
+    hotkey = str(daemon.config.get("dictation_hotkey", "double_lctrl"))
+    return format_hotkey_label(hotkey)
 
 
 def _paste_last_hotkey_display_name(daemon: TTSDaemon) -> str:
     hotkey = str(daemon.config.get("paste_last_hotkey", "ctrl+alt+v"))
-    return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
+    return format_hotkey_label(hotkey)
+
+
+def _silence_delay_display_name(daemon: TTSDaemon) -> str:
+    val = float(daemon.config.get("stt_silence_delay", 1.0))
+    return f"{val:.1f}s"
 
 
 # -- Main setup ---------------------------------------------------------------
@@ -297,6 +368,9 @@ def setup_tray() -> None:
     def make_volume_setter(vol: float):
         return lambda icon, item_action: daemon.set_volume(vol)
 
+    def make_silence_delay_setter(delay_s: float):
+        return lambda icon, item_action: daemon.set_stt_silence_delay(delay_s)
+
     def voice_group_items(voices: list[tuple[str, str]]) -> list:
         """Voices under disabled "Female" / "Male" headers."""
         items: list = []
@@ -338,6 +412,16 @@ def setup_tray() -> None:
             radio=True,
         )
         for label, v in VOLUMES.items()
+    ]
+
+    silence_delay_menu_items = [
+        item(
+            label,
+            make_silence_delay_setter(d_val),
+            checked=lambda i, dv=d_val: abs(float(daemon.config.get("stt_silence_delay", 1.0)) - dv) < 0.05,
+            radio=True,
+        )
+        for label, d_val in STT_SILENCE_DELAYS.items()
     ]
 
     # -- Build the tray icon and menu -----------------------------------------
@@ -385,6 +469,10 @@ def setup_tray() -> None:
                 on_paste_last_dictation,
                 enabled=lambda i: bool(daemon.stt.last_dictated),
             ),
+            item(
+                lambda text: f"Dictation Auto-Stop Delay\t{_silence_delay_display_name(daemon)}",
+                Menu(*silence_delay_menu_items),
+            ),
             Menu.SEPARATOR,
             # Voice settings with the current value right-aligned
             item(
@@ -421,4 +509,29 @@ def setup_tray() -> None:
     )
     daemon.tray_icon = tray
     daemon.on_state_change = refresh_tray
+
+    def _tray_visualizer_loop() -> None:
+        was_animating = False
+        while True:
+            try:
+                rec = daemon.stt.is_recording
+                trans = daemon.stt.is_transcribing
+                if rec or trans:
+                    was_animating = True
+                    levels = list(getattr(daemon.stt.recorder, "level_bars", ()))
+                    tray.icon = create_recording_visualizer_icon(
+                        levels, time.perf_counter(), transcribing=trans
+                    )
+                    time.sleep(0.09)
+                else:
+                    if was_animating:
+                        was_animating = False
+                        tray.icon = create_tray_icon(current_state())
+                    time.sleep(0.15)
+            except Exception:
+                time.sleep(0.2)
+
+    threading.Thread(
+        target=_tray_visualizer_loop, daemon=True, name="tray-visualizer"
+    ).start()
     tray.run()

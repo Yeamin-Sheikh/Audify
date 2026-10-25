@@ -202,8 +202,9 @@ DEFAULT_CONFIG: dict = {
     "volume": 1.0,
     "skip_code_blocks": True,
     "stop_hotkey": "ctrl+alt+s",
-    "dictation_hotkey": "ctrl+alt+d",
+    "dictation_hotkey": "double_lctrl",
     "paste_last_hotkey": "ctrl+alt+v",
+    "stt_silence_delay": 1.0,
     "pronunciation_dict": {},
     "stt_vocabulary": {},
     "removed_stt_vocabulary": [],
@@ -253,6 +254,14 @@ VOLUMES: dict[str, float] = {
     "60%": 0.6,
     "80%": 0.8,
     "100%": 1.0,
+}
+
+STT_SILENCE_DELAYS: dict[str, float] = {
+    "0.6s (Ultra Fast)": 0.6,
+    "0.8s (Fast)": 0.8,
+    "1.0s (Balanced)": 1.0,
+    "1.4s (Relaxed)": 1.4,
+    "2.0s (Long Pauses)": 2.0,
 }
 
 
@@ -328,6 +337,13 @@ def load_config() -> dict:
         if k not in stt_vocab and k not in removed_stt:
             stt_vocab[k] = v
             stt_changed = True
+    if config.get("dictation_hotkey") == "ctrl+alt+d" and not config.get("dictation_hotkey_migrated_v299"):
+        config["dictation_hotkey"] = "double_lctrl"
+        config["dictation_hotkey_migrated_v299"] = True
+        stt_changed = True
+    if not isinstance(config.get("stt_silence_delay"), (int, float)):
+        config["stt_silence_delay"] = 1.0
+        stt_changed = True
     if stt_changed and not changed:
         save_config(config)
 

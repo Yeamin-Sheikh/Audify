@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from audify.clipboard import get_clipboard_text
 from audify.config import apply_stt_vocabulary, set_stt_vocab_rule
+from audify.gui.stt_hud import DictationVisualizerHUD
 
 if TYPE_CHECKING:
     from audify.engine import TTSDaemon
@@ -180,6 +181,9 @@ class Win32MicRecorder:
         self._open_event = threading.Event()
         self._open_error: str | None = None
         self._auto_stop_cb: Callable[[str], None] | None = None
+        self.current_level: float = 0.0
+        self.level_bars: list[float] = [0.08] * 9
+        self.speech_detected: bool = False
 
     @property
     def is_recording(self) -> bool:
@@ -189,11 +193,12 @@ class Win32MicRecorder:
         self,
         on_auto_stop: Callable[[str], None] | None = None,
         auto_stop_on_silence: bool = True,
+        silence_delay_s: float = 1.0,
     ) -> None:
         """Open the default microphone and begin capturing 16 kHz mono PCM frames.
 
         When *auto_stop_on_silence* is True (default), automatically stops recording
-        once the user speaks and then pauses for 1.4 seconds (like Google Voice Typing),
+        once the user speaks and then pauses for *silence_delay_s* seconds,
         or after 8 seconds if no speech is detected, invoking ``on_auto_stop(reason)``.
         """
         with self._lock:
@@ -205,12 +210,15 @@ class Win32MicRecorder:
             self._trim_start_idx = 0
             self._trim_end_idx = None
             self._recording = True
+            self.current_level = 0.0
+            self.level_bars = [0.08] * 9
+            self.speech_detected = False
             self._auto_stop_cb = on_auto_stop
             self._open_event.clear()
             self._open_error = None
             self._thread = threading.Thread(
                 target=self._record_loop,
-                args=(auto_stop_on_silence,),
+                args=(auto_stop_on_silence, silence_delay_s),
                 daemon=True,
                 name="win32-mic-recorder",
             )
@@ -255,7 +263,12 @@ class Win32MicRecorder:
             wf.writeframes(pcm_data)
         return duration_s
 
-    def _record_loop(self, auto_stop_on_silence: bool = True) -> None:
+    def _record_loop(
+        self,
+        auto_stop_on_silence: bool = True,
+        silence_delay_s: float = 1.0,
+    ) -> None:
+        end_silence_chunks = max(4, min(30, int(round(float(silence_delay_s) * 10.0))))
         wfx = WAVEFORMATEX()
         wfx.wFormatTag = WAVE_FORMAT_PCM
         wfx.nChannels = CHANNELS
@@ -313,9 +326,13 @@ class Win32MicRecorder:
                             raw_chunk = buffers[i].raw[:recorded]
                             self._frames.append(raw_chunk)
                             chunk_count += 1
+                            rms, peak = _frame_rms_and_peak(raw_chunk)
+                            norm_lvl = min(1.0, max(0.05, (rms - noise_floor * 0.8) / 2600.0))
+                            self.current_level = 0.45 * self.current_level + 0.55 * norm_lvl
+                            bars = list(self.level_bars[1:]) + [self.current_level]
+                            self.level_bars = bars
 
                             if auto_stop_on_silence:
-                                rms, peak = _frame_rms_and_peak(raw_chunk)
                                 if not speech_started:
                                     if chunk_count > VAD_IGNORE_INITIAL_CHUNKS:
                                         onset_thresh = max(
@@ -325,6 +342,7 @@ class Win32MicRecorder:
                                             active_streak += 1
                                             if active_streak >= 2:
                                                 speech_started = True
+                                                self.speech_detected = True
                                                 self._trim_start_idx = max(
                                                     0,
                                                     len(self._frames)
@@ -354,7 +372,7 @@ class Win32MicRecorder:
                                         silence_streak = 0
                                     else:
                                         silence_streak += 1
-                                        if silence_streak >= VAD_END_SILENCE_CHUNKS:
+                                        if silence_streak >= end_silence_chunks:
                                             # Keep 400ms of trailing silence and trim the rest
                                             trim_off = (
                                                 silence_streak - VAD_TRAILING_KEEP_CHUNKS
@@ -1190,6 +1208,7 @@ class BarkCleanController:
         self.daemon = daemon
         self.recorder = Win32MicRecorder()
         self.learner = DictationCorrectionLearner(daemon=daemon)
+        self.hud = DictationVisualizerHUD(self)
         self.last_dictated: str = ""
         self._lock = threading.Lock()
         self._transcribing = False
@@ -1246,6 +1265,11 @@ class BarkCleanController:
             self.stop_and_transcribe(on_complete=on_complete)
             return "transcribing"
 
+    def on_escape_pressed(self) -> None:
+        """Called when Escape is intercepted during active dictation (prevents browser blur)."""
+        if self.recorder.is_recording and not self._transcribing:
+            self.stop_and_transcribe()
+
     def start_dictation(
         self, on_complete: Callable[[bool, str], None] | None = None
     ) -> bool:
@@ -1254,12 +1278,23 @@ class BarkCleanController:
             return False
         try:
             self._on_complete_cb = on_complete
+            silence_delay_s = 1.0
             if self.daemon is not None:
                 self.daemon.stop_audio()
+                with self.daemon._config_lock:
+                    silence_delay_s = float(
+                        self.daemon.config.get("stt_silence_delay", 1.0)
+                    )
+                try:
+                    self.daemon._clip_listener.set_recording_escape_guard(True)
+                except Exception:
+                    pass
             self.recorder.start(
                 on_auto_stop=self._on_vad_auto_stop,
                 auto_stop_on_silence=True,
+                silence_delay_s=silence_delay_s,
             )
+            self.hud.show()
             if self.daemon is not None:
                 self.daemon._set_status("Listening...", speaking=False)
             # Ensure the Bark 3.0 Clean worker is warm while the user speaks
@@ -1270,7 +1305,12 @@ class BarkCleanController:
             ).start()
             return True
         except Exception as e:
+            self.hud.hide()
             if self.daemon is not None:
+                try:
+                    self.daemon._clip_listener.set_recording_escape_guard(False)
+                except Exception:
+                    pass
                 self.daemon._notify_error(f"Microphone error: {e}")
                 self.daemon._set_status("Ready", speaking=False)
             return False
@@ -1280,9 +1320,14 @@ class BarkCleanController:
         if reason == "speech_ended":
             self.stop_and_transcribe(_from_vad=True)
         else:
+            self.hud.hide()
             with self.recorder._lock:
                 self.recorder._frames = []
             if self.daemon is not None:
+                try:
+                    self.daemon._clip_listener.set_recording_escape_guard(False)
+                except Exception:
+                    pass
                 self.daemon._set_status("Ready", speaking=False)
             cb = self._on_complete_cb
             self._on_complete_cb = None
@@ -1338,7 +1383,12 @@ class BarkCleanController:
                     except Exception:
                         pass
                 self._transcribing = False
+                self.hud.hide()
                 if self.daemon is not None:
+                    try:
+                        self.daemon._clip_listener.set_recording_escape_guard(False)
+                    except Exception:
+                        pass
                     self.daemon._set_status("Ready", speaking=False)
                 cb = self._on_complete_cb
                 self._on_complete_cb = None

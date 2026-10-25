@@ -13,6 +13,30 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.9 Double Left Ctrl trigger, Escape focus guard, adjustable silence delay, and live audio visualizer
+
+**Duration:** ~12m
+**Status:** Done
+
+#### What changed
+- Mapped default voice dictation shortcut to **Double Left Ctrl** (`double_lctrl`) using `DoubleTapDetector` in `audify/clipboard.py` and `audify/engine.py`, with support for recording double-tap modifier shortcuts (`double_lctrl`, `double_rctrl`, `double_lalt`, `double_lshift`) in the Control Center.
+- Added dynamic Win32 `Escape` interception (`set_recording_escape_guard` / `HOTKEY_ID_ACTIVE_ESC` in `audify/clipboard.py` and `on_escape_pressed` in `audify/stt.py`) while dictating so pressing `Escape` after speaking finishes and transcribes immediately without blurring/unfocusing browser input fields.
+- Added configurable **Auto-stop silence** delay (`STT_SILENCE_DELAYS`: `0.6s`, `0.8s`, `1.0s`, `1.4s`, `2.0s`, default `1.0s`) in both the Control Center sidebar and the system tray menu.
+- Added a real-time audio-reactive **Dictation Visualizer HUD pill** (`audify/gui/stt_hud.py`, using `WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST` so it never steals focus or blocks clicks) plus a live 10 FPS 5-bar animated visualizer in the system tray icon (`create_recording_visualizer_icon` in `audify/tray.py`).
+- Bumped version to `2.9.9`.
+
+#### Files touched
+- `audify/clipboard.py`, added `DOUBLE_TAP_HOTKEYS`, `DoubleTapDetector`, `format_hotkey_label()`, `is_double_tap_hotkey()`, and `set_recording_escape_guard()`.
+- `audify/config.py`, set default `dictation_hotkey` to `"double_lctrl"`, added `stt_silence_delay` (`1.0s`) and `STT_SILENCE_DELAYS`.
+- `audify/gui/stt_hud.py`, created non-activating click-through floating audio visualizer pill.
+- `audify/stt.py`, added real-time `current_level` and `level_bars` tracking, configurable `silence_delay_s`, `on_escape_pressed()`, and HUD lifecycle hooks.
+- `audify/engine.py`, wired `DoubleTapDetector`, `set_stt_silence_delay()`, and `on_escape_hotkey`.
+- `audify/tray.py`, added 10 FPS animated tray icon visualizer (`create_recording_visualizer_icon`) and `Dictation Auto-Stop Delay` submenu.
+- `audify/gui/control_center.py`, added `Auto-stop silence` combobox and double-tap modifier capture in the shortcut recorder.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.9`.
+
+---
+
 ### 2026-10-25, v2.9.8 STT Custom Vocabulary and Double-Click Auto-Correction Learner
 
 **Duration:** ~10m

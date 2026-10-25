@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, TYPE_CHECKING
@@ -12,8 +13,10 @@ if TYPE_CHECKING:
 
 from audify import __version__
 from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
+from audify.clipboard import format_hotkey_label
 from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
 from audify.config import (
+    STT_SILENCE_DELAYS,
     VOICES,
     RATES,
     remove_rule,
@@ -230,12 +233,12 @@ def _run_control_center(daemon: Any) -> None:
 
     root.update_idletasks()
     _apply_dark_title_bar(root)
-    width, height = S(1020), S(730)
+    width, height = S(1020), S(785)
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.resizable(True, True)
-    root.minsize(S(880), S(660))
+    root.minsize(S(880), S(710))
 
     _configure_styles(root, S)
 
@@ -485,7 +488,35 @@ def _run_control_center(daemon: Any) -> None:
         accent_color=ACCENT_COLOR,
         accent_hover=ACCENT_HOVER,
     )
-    dictate_btn.pack(fill=tk.X, pady=(0, S(6)))
+    dictate_btn.pack(fill=tk.X, pady=(0, S(8)))
+
+    delay_row = tk.Frame(sidebar, bg=CARD_COLOR)
+    delay_row.pack(fill=tk.X, pady=(0, S(6)))
+    ttk.Label(delay_row, text="Auto-stop silence", style="Field.TLabel").pack(side=tk.LEFT)
+    cur_delay_val = float(daemon.config.get("stt_silence_delay", 1.0))
+    current_delay_name = next(
+        (n for n, d in STT_SILENCE_DELAYS.items() if abs(d - cur_delay_val) < 0.05),
+        "1.0s (Balanced)",
+    )
+    delay_var = tk.StringVar(value=current_delay_name)
+    delay_cb = ttk.Combobox(
+        delay_row,
+        textvariable=delay_var,
+        values=list(STT_SILENCE_DELAYS.keys()),
+        state="readonly",
+        style="Dark.TCombobox",
+        font=("Segoe UI", 9),
+        width=15,
+    )
+    delay_cb.pack(side=tk.RIGHT)
+
+    def on_delay_change(event) -> None:
+        d_val = STT_SILENCE_DELAYS.get(delay_var.get())
+        if d_val is not None and hasattr(daemon, "set_stt_silence_delay"):
+            daemon.set_stt_silence_delay(d_val)
+        delay_cb.selection_clear()
+
+    delay_cb.bind("<<ComboboxSelected>>", on_delay_change)
 
     tools_status_lbl.pack(anchor=tk.W)
 
@@ -496,9 +527,10 @@ def _run_control_center(daemon: Any) -> None:
     ttk.Label(footer, text="SHORTCUTS (CLICK TO CHANGE)", style="Caption.TLabel").pack(anchor=tk.W, pady=(0, S(6)))
 
     def _fmt_hk(hk_str: str) -> str:
-        return "+".join(part.strip().capitalize() for part in hk_str.split("+") if part.strip())
+        return format_hotkey_label(hk_str)
 
     recording_target: list[tuple[str, tk.Label, str] | None] = [None]
+    last_mod_tap: list[tuple[str, float]] = [("", 0.0)]
     hotkey_badges: dict[str, tk.Label] = {}
 
     def _cancel_hotkey_record() -> None:
@@ -507,12 +539,14 @@ def _run_control_center(daemon: Any) -> None:
             return
         cfg_key, badge_lbl, default_hk = cur
         recording_target[0] = None
+        last_mod_tap[0] = ("", 0.0)
         saved_hk = str(daemon.config.get(cfg_key, default_hk))
         badge_lbl.config(text=_fmt_hk(saved_hk), fg=TEXT_COLOR, highlightbackground=BORDER_COLOR)
 
     def _start_hotkey_record(cfg_key: str, badge_lbl: tk.Label, default_hk: str) -> None:
         _cancel_hotkey_record()
         recording_target[0] = (cfg_key, badge_lbl, default_hk)
+        last_mod_tap[0] = ("", 0.0)
         badge_lbl.config(text="Press keys...", fg=ACCENT_COLOR, highlightbackground=ACCENT_COLOR)
         root.focus_force()
 
@@ -524,12 +558,35 @@ def _run_control_center(daemon: Any) -> None:
         ks = (getattr(event, "keysym", "") or "").lower()
         kc = getattr(event, "keycode", 0) or 0
 
+        double_mod_map = {
+            "control_l": "double_lctrl",
+            "control_r": "double_rctrl",
+            "alt_l": "double_lalt",
+            "shift_l": "double_lshift",
+        }
+        if ks in double_mod_map:
+            now_m = time.monotonic()
+            prev_ks, prev_t = last_mod_tap[0]
+            if prev_ks == ks and 0.05 <= (now_m - prev_t) <= 0.55:
+                combo_str = double_mod_map[ks]
+                recording_target[0] = None
+                last_mod_tap[0] = ("", 0.0)
+                if hasattr(daemon, "set_hotkey") and daemon.set_hotkey(cfg_key, combo_str):
+                    badge_lbl.config(text=_fmt_hk(combo_str), fg=TEXT_COLOR, highlightbackground=BORDER_COLOR)
+                    tools_status_lbl.config(
+                        text=f"Shortcut set to {_fmt_hk(combo_str)}",
+                        foreground=SUCCESS_COLOR,
+                    )
+                return "break"
+            last_mod_tap[0] = (ks, now_m)
+            return "break"
+
         if ks in (
-            "control_l", "control_r", "alt_l", "alt_r",
-            "shift_l", "shift_r", "win_l", "win_r", "super_l", "super_r",
+            "alt_r", "shift_r", "win_l", "win_r", "super_l", "super_r",
         ):
             return "break"
 
+        last_mod_tap[0] = ("", 0.0)
         if ks == "escape":
             _cancel_hotkey_record()
             return "break"
@@ -604,7 +661,7 @@ def _run_control_center(daemon: Any) -> None:
         badge.bind("<Button-1>", lambda e, k=cfg_key, b=badge, d=default_hk: _start_hotkey_record(k, b, d))
         hotkey_badges[cfg_key] = badge
 
-    _make_hotkey_row("Dictate (Bark 3.0)", "dictation_hotkey", "ctrl+alt+d", S(5))
+    _make_hotkey_row("Dictate (Bark 3.0)", "dictation_hotkey", "double_lctrl", S(5))
     _make_hotkey_row("Paste last dictation", "paste_last_hotkey", "ctrl+alt+v", S(5))
     _make_hotkey_row("Stop playback", "stop_hotkey", "ctrl+alt+s", S(8))
     ttk.Label(footer, text=f"Version {__version__}", style="CardSub.TLabel").pack(anchor=tk.W)
@@ -981,6 +1038,14 @@ def _run_control_center(daemon: Any) -> None:
             cur_skip = daemon.config.get("skip_code_blocks", True)
             if skip_var.get() != cur_skip:
                 skip_var.set(cur_skip)
+
+            cur_delay = float(daemon.config.get("stt_silence_delay", 1.0))
+            d_name = next(
+                (n for n, d in STT_SILENCE_DELAYS.items() if abs(d - cur_delay) < 0.05),
+                None,
+            )
+            if d_name and delay_var.get() != d_name:
+                delay_var.set(d_name)
 
             stt = getattr(daemon, "stt", None)
             if stt is not None:

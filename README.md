@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.8.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.9.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -115,7 +115,7 @@ Download **`Audify.exe`** and run it from anywhere.
 | Read text aloud | Copy it with `Ctrl+C` or `Ctrl+Shift+C` |
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
-| Dictate speech to text (Bark 3.0 Clean) | Press `Ctrl+Alt+D` once and speak; automatically stops, transcribes, and pastes when you pause |
+| Dictate speech to text (Bark 3.0 Clean) | Double-tap `Left Ctrl` and speak; automatically stops, transcribes, and pastes when you pause (or press `Esc` to finish immediately without unfocusing your input field) |
 | Re-paste last dictation | `Ctrl+Alt+V` (or Tray -> **Paste Last Dictation**) if your cursor missed the input box |
 | Change global shortcuts | Open **Control Center...** and click any shortcut badge (`Dictate`, `Paste last dictation`, `Stop playback`) |
 | Teach STT custom names/words | After dictating, double-click any misheard word and type the fix (auto-learns!), or manage in **Control Center -> STT Vocabulary** |
@@ -199,6 +199,13 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.9
+
+- **Double Left Ctrl Dictation Trigger**: mapped default voice dictation activation to **Double Left Ctrl** (`double_lctrl` via `DoubleTapDetector` in `audify/clipboard.py` and `audify/engine.py`) so you can trigger dictation with a quick double-tap of your pinky without looking down at the keyboard, while ignoring `Ctrl+C`, `Ctrl+V`, holds, and `Ctrl+Click`.
+- **Escape Key Focus Protection & Instant Finish**: while dictating, Audify temporarily intercepts `Escape` at the Win32 kernel level (`RegisterHotKey` `HOTKEY_ID_ACTIVE_ESC` in `audify/clipboard.py`) so pressing `Escape` after speaking immediately finishes and transcribes your speech without allowing the browser or app to unfocus your input field.
+- **Adjustable Auto-Stop Silence Delay**: added **Auto-stop silence** in the Control Center sidebar and **Dictation Auto-Stop Delay** in the system tray menu (`0.6s`, `0.8s`, `1.0s`, `1.4s`, `2.0s`, defaulting to `1.0s`).
+- **Live Audio-Reactive Dictation Visualizer**: added a non-focus-stealing, click-through floating pill visualizer HUD (`audify/gui/stt_hud.py`) and an animated 5-bar equalizer inside the system tray icon (`create_recording_visualizer_icon` in `audify/tray.py`) that react in real time to your microphone voice levels while dictating.
 
 ### v2.9.8
 

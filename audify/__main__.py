@@ -47,11 +47,22 @@ def _selftest(report_path: str) -> int:
 
     # 3. Verify Win32 clipboard listener + RegisterHotKey
     try:
-        from audify.clipboard import ClipboardListener, check_copy_keys, parse_win32_hotkey
+        from audify.clipboard import (
+            ClipboardListener,
+            VK_LCONTROL,
+            check_copy_keys,
+            format_hotkey_label,
+            is_double_tap_hotkey,
+            parse_win32_hotkey,
+        )
 
         parsed = parse_win32_hotkey("ctrl+alt+s")
         if not parsed:
             raise RuntimeError("parse_win32_hotkey('ctrl+alt+s') returned None")
+        if is_double_tap_hotkey("double_lctrl") != VK_LCONTROL:
+            raise RuntimeError("is_double_tap_hotkey('double_lctrl') failed")
+        if format_hotkey_label("double_lctrl") != "Double Left Ctrl":
+            raise RuntimeError("format_hotkey_label('double_lctrl') failed")
         check_copy_keys()
         listener = ClipboardListener(
             lambda _t: None,

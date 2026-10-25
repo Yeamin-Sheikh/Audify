@@ -25,6 +25,7 @@ WM_CLOSE = 0x0010
 WM_HOTKEY = 0x0312
 WM_CLIPBOARDUPDATE = 0x031D
 WM_APP_REBIND_HOTKEYS = 0x8001
+WM_APP_SET_ESC_GUARD = 0x8002
 HWND_MESSAGE = wintypes.HWND(-3)  # Message-only window (no taskbar icon)
 CF_UNICODETEXT = 13
 
@@ -37,6 +38,7 @@ MOD_NOREPEAT = 0x4000
 HOTKEY_ID_STOP = 1
 HOTKEY_ID_DICTATION = 2
 HOTKEY_ID_PASTE_LAST = 3
+HOTKEY_ID_ACTIVE_ESC = 4
 
 # Win32 Virtual-Key codes for direct physical state queries via GetAsyncKeyState
 VK_LBUTTON = 0x01
@@ -51,6 +53,19 @@ VK_INSERT = 0x2D
 VK_DELETE = 0x2E
 VK_C = 0x43
 VK_X = 0x58
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
+
+DOUBLE_TAP_HOTKEYS: dict[str, tuple[int, str]] = {
+    "double_lctrl": (VK_LCONTROL, "Double Left Ctrl"),
+    "double_rctrl": (VK_RCONTROL, "Double Right Ctrl"),
+    "double_lalt": (VK_LMENU, "Double Left Alt"),
+    "double_lshift": (VK_LSHIFT, "Double Left Shift"),
+}
 
 # Callback type for the window procedure
 LRESULT = ctypes.c_ssize_t
@@ -183,6 +198,119 @@ def check_copy_keys() -> bool:
         return False
 
 
+def is_double_tap_hotkey(hotkey_str: str) -> int | None:
+    """Return the Win32 VK code if *hotkey_str* is a double-tap modifier shortcut, else None."""
+    entry = DOUBLE_TAP_HOTKEYS.get((hotkey_str or "").strip().lower())
+    return entry[0] if entry else None
+
+
+def format_hotkey_label(hotkey_str: str) -> str:
+    """Return a human-readable display string for *hotkey_str*."""
+    norm = (hotkey_str or "").strip().lower()
+    if norm in DOUBLE_TAP_HOTKEYS:
+        return DOUBLE_TAP_HOTKEYS[norm][1]
+    return "+".join(part.strip().capitalize() for part in norm.split("+") if part.strip())
+
+
+class DoubleTapDetector:
+    """Detects a clean double-tap of a single modifier key (such as Left Ctrl) via Win32 state."""
+
+    MAX_HOLD_S = 0.32
+    MAX_GAP_S = 0.38
+
+    def __init__(self, target_vk: int | None = VK_LCONTROL) -> None:
+        self.target_vk: int | None = target_vk
+        self._was_down: bool = False
+        self._down_time: float = 0.0
+        self._tainted: bool = False
+        self._first_tap_up_time: float = 0.0
+
+    def set_target_vk(self, target_vk: int | None) -> None:
+        self.target_vk = target_vk
+        self.reset()
+
+    def reset(self) -> None:
+        self._was_down = False
+        self._down_time = 0.0
+        self._tainted = False
+        self._first_tap_up_time = 0.0
+
+    def taint(self) -> None:
+        self._tainted = True
+        self._first_tap_up_time = 0.0
+
+    def taint_if_other_key(self, key_name: str) -> None:
+        """Mark current tap as tainted if any non-target key is pressed."""
+        if self.target_vk is None:
+            return
+        allowed = {
+            VK_LCONTROL: ("left ctrl", "ctrl"),
+            VK_RCONTROL: ("right ctrl", "ctrl"),
+            VK_LMENU: ("left alt", "alt"),
+            VK_LSHIFT: ("left shift", "shift"),
+        }.get(self.target_vk, ())
+        if key_name not in allowed:
+            self.taint()
+
+    def poll(self) -> bool:
+        """Polled every 15ms. Returns True on the release of a clean second solo tap."""
+        vk = self.target_vk
+        if vk is None:
+            return False
+
+        now = time.monotonic()
+        down = is_vk_down(vk)
+
+        for m_vk in (
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LMENU,
+            VK_RMENU,
+            VK_LSHIFT,
+            VK_RSHIFT,
+        ):
+            if m_vk != vk and is_vk_down(m_vk):
+                self.taint()
+                break
+
+        if down:
+            if not self._was_down:
+                self._was_down = True
+                self._down_time = now
+                self._tainted = False
+                if (
+                    self._first_tap_up_time
+                    and (now - self._first_tap_up_time) > self.MAX_GAP_S
+                ):
+                    self._first_tap_up_time = 0.0
+            else:
+                if (now - self._down_time) > self.MAX_HOLD_S:
+                    self.taint()
+            return False
+
+        if self._was_down:
+            self._was_down = False
+            hold_dur = now - self._down_time
+            if self._tainted or hold_dur > self.MAX_HOLD_S:
+                self._tainted = False
+                self._first_tap_up_time = 0.0
+                return False
+
+            if (
+                self._first_tap_up_time
+                and (self._down_time - self._first_tap_up_time) <= self.MAX_GAP_S
+            ):
+                self._first_tap_up_time = 0.0
+                return True
+
+            self._first_tap_up_time = now
+            return False
+
+        if self._first_tap_up_time and (now - self._first_tap_up_time) > self.MAX_GAP_S:
+            self._first_tap_up_time = 0.0
+        return False
+
+
 def parse_win32_hotkey(hotkey_str: str) -> tuple[int, int] | None:
     """Convert a hotkey string like 'ctrl+alt+s' into (win32_modifiers, vk_code)."""
     parts = [p.strip().lower() for p in hotkey_str.split("+") if p.strip()]
@@ -306,10 +434,11 @@ class ClipboardListener:
         on_text_change: Callable[[str], None],
         stop_hotkey: str = "ctrl+alt+s",
         on_stop_hotkey: Callable[[], None] | None = None,
-        dictation_hotkey: str = "ctrl+alt+d",
+        dictation_hotkey: str = "double_lctrl",
         on_dictation_hotkey: Callable[[], None] | None = None,
         paste_last_hotkey: str = "ctrl+alt+v",
         on_paste_last_hotkey: Callable[[], None] | None = None,
+        on_escape_hotkey: Callable[[], None] | None = None,
     ) -> None:
         self.on_text_change = on_text_change
         self.stop_hotkey = stop_hotkey
@@ -318,6 +447,7 @@ class ClipboardListener:
         self.on_dictation_hotkey = on_dictation_hotkey
         self.paste_last_hotkey = paste_last_hotkey
         self.on_paste_last_hotkey = on_paste_last_hotkey
+        self.on_escape_hotkey = on_escape_hotkey
         self._hwnd: int | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -329,6 +459,7 @@ class ClipboardListener:
         self._hotkey_registered: bool = False
         self._dictation_hotkey_registered: bool = False
         self._paste_last_hotkey_registered: bool = False
+        self._esc_guard_registered: bool = False
 
     def _unbind_all_hotkeys(self, hwnd: int) -> None:
         if self._hotkey_registered:
@@ -340,6 +471,9 @@ class ClipboardListener:
         if self._paste_last_hotkey_registered:
             user32.UnregisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST)
             self._paste_last_hotkey_registered = False
+        if self._esc_guard_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_ACTIVE_ESC)
+            self._esc_guard_registered = False
 
     def _bind_all_hotkeys(self, hwnd: int) -> None:
         self._unbind_all_hotkeys(hwnd)
@@ -377,10 +511,25 @@ class ClipboardListener:
         if self._hwnd:
             user32.PostMessageW(self._hwnd, WM_APP_REBIND_HOTKEYS, 0, 0)
 
+    def set_recording_escape_guard(self, active: bool) -> None:
+        """Intercept Escape via RegisterHotKey only while dictating so Escape never unfocuses the input box."""
+        if self._hwnd:
+            user32.PostMessageW(self._hwnd, WM_APP_SET_ESC_GUARD, 1 if active else 0, 0)
+
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         """Win32 window procedure. Handles clipboard updates and native global hotkeys."""
         if msg == WM_APP_REBIND_HOTKEYS:
             self._bind_all_hotkeys(hwnd)
+            return 0
+        if msg == WM_APP_SET_ESC_GUARD:
+            if wparam:
+                if not self._esc_guard_registered:
+                    if user32.RegisterHotKey(hwnd, HOTKEY_ID_ACTIVE_ESC, MOD_NOREPEAT, VK_ESCAPE):
+                        self._esc_guard_registered = True
+            else:
+                if self._esc_guard_registered:
+                    user32.UnregisterHotKey(hwnd, HOTKEY_ID_ACTIVE_ESC)
+                    self._esc_guard_registered = False
             return 0
         if msg == WM_HOTKEY:
             if wparam == HOTKEY_ID_STOP and self.on_stop_hotkey:
@@ -396,6 +545,11 @@ class ClipboardListener:
             elif wparam == HOTKEY_ID_PASTE_LAST and self.on_paste_last_hotkey:
                 try:
                     self.on_paste_last_hotkey()
+                except Exception:
+                    pass
+            elif wparam == HOTKEY_ID_ACTIVE_ESC and self.on_escape_hotkey:
+                try:
+                    self.on_escape_hotkey()
                 except Exception:
                     pass
             return 0

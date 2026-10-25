@@ -20,6 +20,7 @@ import pynput.mouse as pynput_mouse
 
 from audify.clipboard import (
     ClipboardListener,
+    DoubleTapDetector,
     MOD_ALT,
     MOD_CONTROL,
     MOD_SHIFT,
@@ -28,6 +29,7 @@ from audify.clipboard import (
     VK_SHIFT,
     check_copy_keys,
     is_ctrl_pressed,
+    is_double_tap_hotkey,
     is_vk_down,
     parse_win32_hotkey,
 )
@@ -70,26 +72,45 @@ class TTSDaemon:
         self.last_ctrl_c_time: float = 0.0
         self._last_stop_time: float = 0.0
 
-        # Parse stop hotkey (default ctrl+alt+s) into Win32 modifiers + VK code
+        # Parse stop hotkey (default ctrl+alt+s) into Win32 modifiers + VK code or double-tap
         stop_hotkey_str = str(self.config.get("stop_hotkey", "ctrl+alt+s"))
-        self._stop_hotkey_parsed = parse_win32_hotkey(stop_hotkey_str) or (
-            MOD_CONTROL | MOD_ALT,
-            ord("S"),
+        self._stop_double_tap = DoubleTapDetector(is_double_tap_hotkey(stop_hotkey_str))
+        self._stop_hotkey_parsed = (
+            None
+            if self._stop_double_tap.target_vk is not None
+            else (
+                parse_win32_hotkey(stop_hotkey_str)
+                or (MOD_CONTROL | MOD_ALT, ord("S"))
+            )
         )
 
-        # Parse dictation hotkey (default ctrl+alt+d) into Win32 modifiers + VK code
-        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "ctrl+alt+d"))
-        self._dictation_hotkey_parsed = parse_win32_hotkey(dictation_hotkey_str) or (
-            MOD_CONTROL | MOD_ALT,
-            ord("D"),
+        # Parse dictation hotkey (default double_lctrl) into double-tap or Win32 modifiers + VK code
+        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_lctrl"))
+        self._dictation_double_tap = DoubleTapDetector(
+            is_double_tap_hotkey(dictation_hotkey_str)
+        )
+        self._dictation_hotkey_parsed = (
+            None
+            if self._dictation_double_tap.target_vk is not None
+            else (
+                parse_win32_hotkey(dictation_hotkey_str)
+                or (MOD_CONTROL | MOD_ALT, ord("D"))
+            )
         )
         self._dictation_combo_was_down: bool = False
 
         # Parse paste-last-dictation hotkey (default ctrl+alt+v) into Win32 modifiers + VK code
         paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "ctrl+alt+v"))
-        self._paste_last_hotkey_parsed = parse_win32_hotkey(paste_last_hotkey_str) or (
-            MOD_CONTROL | MOD_ALT,
-            ord("V"),
+        self._paste_last_double_tap = DoubleTapDetector(
+            is_double_tap_hotkey(paste_last_hotkey_str)
+        )
+        self._paste_last_hotkey_parsed = (
+            None
+            if self._paste_last_double_tap.target_vk is not None
+            else (
+                parse_win32_hotkey(paste_last_hotkey_str)
+                or (MOD_CONTROL | MOD_ALT, ord("V"))
+            )
         )
         self._paste_last_combo_was_down: bool = False
 
@@ -112,6 +133,7 @@ class TTSDaemon:
             on_dictation_hotkey=self.toggle_dictation,
             paste_last_hotkey=paste_last_hotkey_str,
             on_paste_last_hotkey=self.paste_last_dictation,
+            on_escape_hotkey=self.stt.on_escape_pressed,
         )
 
         # Tray icon (injected later)
@@ -230,6 +252,8 @@ class TTSDaemon:
 
     def _is_stop_combo_down(self) -> bool:
         """Return True if the configured stop hotkey (e.g. Ctrl+Alt+S) is physically held down."""
+        if self._stop_hotkey_parsed is None:
+            return False
         mods, vk = self._stop_hotkey_parsed
         if not is_vk_down(vk):
             return False
@@ -243,6 +267,8 @@ class TTSDaemon:
 
     def _is_dictation_combo_down(self) -> bool:
         """Return True if the configured dictation hotkey (e.g. Ctrl+Alt+D) is physically held down."""
+        if self._dictation_hotkey_parsed is None:
+            return False
         mods, vk = self._dictation_hotkey_parsed
         if not is_vk_down(vk):
             return False
@@ -256,6 +282,8 @@ class TTSDaemon:
 
     def _is_paste_last_combo_down(self) -> bool:
         """Return True if the configured paste-last hotkey (e.g. Ctrl+Alt+V) is physically held down."""
+        if self._paste_last_hotkey_parsed is None:
+            return False
         mods, vk = self._paste_last_hotkey_parsed
         if not is_vk_down(vk):
             return False
@@ -275,11 +303,20 @@ class TTSDaemon:
         """Re-paste the most recently dictated speech into the active input field."""
         self.stt.paste_last_dictation()
 
+    def set_stt_silence_delay(self, delay_s: float) -> None:
+        """Update the auto-stop silence delay (in seconds) for Bark 3.0 Clean dictation."""
+        val = max(0.4, min(3.0, round(float(delay_s), 2)))
+        with self._config_lock:
+            self.config["stt_silence_delay"] = val
+            save_config(self.config)
+        self._notify_state_change()
+
     def set_hotkey(self, key_name: str, hotkey_str: str) -> bool:
         """Update a global shortcut key ('dictation_hotkey', 'paste_last_hotkey', or 'stop_hotkey')."""
         norm = hotkey_str.strip().lower()
-        parsed = parse_win32_hotkey(norm)
-        if not parsed:
+        dt_vk = is_double_tap_hotkey(norm)
+        parsed = None if dt_vk is not None else parse_win32_hotkey(norm)
+        if dt_vk is None and not parsed:
             return False
 
         with self._config_lock:
@@ -287,13 +324,16 @@ class TTSDaemon:
             save_config(self.config)
 
         if key_name == "stop_hotkey":
+            self._stop_double_tap.set_target_vk(dt_vk)
             self._stop_hotkey_parsed = parsed
             self._clip_listener.rebind_hotkeys(stop_hotkey=norm)
         elif key_name == "dictation_hotkey":
+            self._dictation_double_tap.set_target_vk(dt_vk)
             self._dictation_hotkey_parsed = parsed
             self._dictation_combo_was_down = False
             self._clip_listener.rebind_hotkeys(dictation_hotkey=norm)
         elif key_name == "paste_last_hotkey":
+            self._paste_last_double_tap.set_target_vk(dt_vk)
             self._paste_last_hotkey_parsed = parsed
             self._paste_last_combo_was_down = False
             self._clip_listener.rebind_hotkeys(paste_last_hotkey=norm)
@@ -314,21 +354,32 @@ class TTSDaemon:
             try:
                 if check_copy_keys() and not self.stt.learner.is_probing_clipboard and (time.monotonic() - self.stt.learner.last_probe_time) >= 0.25:
                     self.last_ctrl_c_time = time.time()
-                if self._is_stop_combo_down():
-                    self.stop_audio()
-                dict_down = self._is_dictation_combo_down()
-                if dict_down and not self._dictation_combo_was_down:
-                    self._dictation_combo_was_down = True
-                    self.toggle_dictation()
-                elif not dict_down:
-                    self._dictation_combo_was_down = False
+                    self._dictation_double_tap.taint()
+                    self._stop_double_tap.taint()
+                    self._paste_last_double_tap.taint()
 
-                paste_down = self._is_paste_last_combo_down()
-                if paste_down and not self._paste_last_combo_was_down:
-                    self._paste_last_combo_was_down = True
+                if self._stop_double_tap.poll() or self._is_stop_combo_down():
+                    self.stop_audio()
+
+                if self._dictation_double_tap.poll():
+                    self.toggle_dictation()
+                else:
+                    dict_down = self._is_dictation_combo_down()
+                    if dict_down and not self._dictation_combo_was_down:
+                        self._dictation_combo_was_down = True
+                        self.toggle_dictation()
+                    elif not dict_down:
+                        self._dictation_combo_was_down = False
+
+                if self._paste_last_double_tap.poll():
                     self.paste_last_dictation()
-                elif not paste_down:
-                    self._paste_last_combo_was_down = False
+                else:
+                    paste_down = self._is_paste_last_combo_down()
+                    if paste_down and not self._paste_last_combo_was_down:
+                        self._paste_last_combo_was_down = True
+                        self.paste_last_dictation()
+                    elif not paste_down:
+                        self._paste_last_combo_was_down = False
             except Exception:
                 pass
             time.sleep(0.015)
@@ -345,6 +396,9 @@ class TTSDaemon:
         except Exception:
             pass
         name = (getattr(event, "name", "") or "").lower()
+        self._dictation_double_tap.taint_if_other_key(name)
+        self._stop_double_tap.taint_if_other_key(name)
+        self._paste_last_double_tap.taint_if_other_key(name)
         if name in ("c", "x", "insert", "ins") and is_ctrl_pressed() and not self.stt.learner.is_probing_clipboard:
             self.last_ctrl_c_time = time.time()
         elif self._is_stop_combo_down():
@@ -366,6 +420,9 @@ class TTSDaemon:
             pass
         if pressed:
             self.last_ctrl_c_time = time.time()
+            self._dictation_double_tap.taint()
+            self._stop_double_tap.taint()
+            self._paste_last_double_tap.taint()
 
     def mark_manual_copy(self) -> None:
         """Record that the user manually triggered a copy shortcut."""
