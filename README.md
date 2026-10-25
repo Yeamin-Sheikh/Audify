@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.5.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.6.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -115,7 +115,7 @@ Download **`Audify.exe`** and run it from anywhere.
 | Read text aloud | Copy it with `Ctrl+C` or `Ctrl+Shift+C` |
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
-| Dictate speech to text (Bark 3.0 Clean) | `Ctrl+Alt+D` to start speaking, `Ctrl+Alt+D` again to transcribe and auto-paste |
+| Dictate speech to text (Bark 3.0 Clean) | Press `Ctrl+Alt+D` once and speak; automatically stops, transcribes, and pastes when you pause |
 | Change voice | Tray -> **Voice** |
 | Change speed | Tray -> **Speed** |
 | Change volume | Tray -> **Volume** |
@@ -196,6 +196,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.6
+
+- **Automatic end-of-speech detection (Google Voice Typing style)**: updated `Win32MicRecorder` and `BarkCleanController` in `audify/stt.py` with adaptive Voice Activity Detection (VAD). Press `Ctrl+Alt+D` once and speak; as soon as you finish speaking and pause for 1.4 seconds, Audify automatically stops recording, trims leading/trailing dead air, transcribes with Bark 3.0 Clean, and pastes into the active window without needing a second keypress. Also pre-warms the Bark 3.0 Clean worker silently in the background on startup for ~2s turnaround.
 
 ### v2.9.5
 

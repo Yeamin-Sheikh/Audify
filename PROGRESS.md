@@ -13,6 +13,24 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.6 Google-style automatic end-of-speech (VAD) detection for Bark 3.0 Clean
+
+**Duration:** ~8m
+**Status:** Done
+
+#### What changed
+- Added adaptive Voice Activity Detection (VAD) in `Win32MicRecorder._record_loop` (`audify/stt.py`) that tracks ambient microphone noise floor, speech onset (with 400ms pre-roll preservation), and 1.4-second post-speech silence (`VAD_END_SILENCE_CHUNKS = 14`) to automatically stop recording, trim dead air, transcribe with Bark 3.0 Clean, and auto-paste without requiring a second `Ctrl+Alt+D` keypress.
+- Added an 8-second no-speech timeout (`VAD_NO_SPEECH_TIMEOUT_CHUNKS = 80`) so pressing `Ctrl+Alt+D` without speaking cancels cleanly back to `"Ready"`.
+- Added silent background pre-warming of the Bark 3.0 Clean worker 3 seconds after `TTSDaemon` startup (`IDLE_UNLOAD_SECONDS = 1800.0`) so even the first dictation completes in ~2 seconds.
+- Bumped version to `2.9.6`.
+
+#### Files touched
+- `audify/stt.py`, added `_frame_rms_and_peak()`, adaptive VAD state machine in `Win32MicRecorder`, `_on_vad_auto_stop()` in `BarkCleanController`, and startup pre-warming.
+- `audify/gui/control_center.py`, wired `_done` callback into `start_dictation()` so Control Center UI updates on VAD auto-stop.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.6`.
+
+---
+
 ### 2026-10-25, v2.9.5 Speech-to-Text dictation with Underdog Bark 3.0 Clean
 
 **Duration:** ~20m

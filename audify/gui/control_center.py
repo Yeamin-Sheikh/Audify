@@ -438,30 +438,30 @@ def _run_control_center(daemon: Any) -> None:
         stt = getattr(daemon, "stt", None)
         if stt is None or stt.is_transcribing:
             return
+
+        def _done(ok: bool, msg: str) -> None:
+            def _ui_update() -> None:
+                try:
+                    dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
+                    preview = msg if len(msg) <= 42 else msg[:39] + "..."
+                    tools_status_lbl.config(
+                        text=f"Dictated: {preview}" if ok else msg,
+                        foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
+                    )
+                except Exception:
+                    pass
+            try:
+                root.after(0, _ui_update)
+            except Exception:
+                pass
+
         if not stt.is_recording:
-            stt.start_dictation()
+            stt.start_dictation(on_complete=_done)
             dictate_btn.config(text="Stop & Transcribe")
-            tools_status_lbl.config(text="Listening... speak now, then click Stop", foreground=ACCENT_COLOR)
+            tools_status_lbl.config(text="Listening... speak now (auto-stops on pause)", foreground=ACCENT_COLOR)
         else:
             dictate_btn.config(state="disabled", text="Transcribing...")
             tools_status_lbl.config(text="Bark 3.0 Clean transcribing...", foreground=TEXT_MUTED)
-
-            def _done(ok: bool, msg: str) -> None:
-                def _ui_update() -> None:
-                    try:
-                        dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
-                        preview = msg if len(msg) <= 42 else msg[:39] + "..."
-                        tools_status_lbl.config(
-                            text=f"Dictated: {preview}" if ok else msg,
-                            foreground=SUCCESS_COLOR if ok else DANGER_COLOR,
-                        )
-                    except Exception:
-                        pass
-                try:
-                    root.after(0, _ui_update)
-                except Exception:
-                    pass
-
             stt.stop_and_transcribe(on_complete=_done)
 
     dictate_btn = create_modern_btn(

@@ -70,6 +70,30 @@ CHUNK_SAMPLES = 1600  # 100ms per buffer at 16 kHz
 CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 NUM_BUFFERS = 6
 
+# -- Voice Activity Detection (VAD) auto-stop constants ----------------------
+# Each chunk is 100ms (0.1s) of 16 kHz 16-bit mono PCM.
+VAD_IGNORE_INITIAL_CHUNKS = 2       # Ignore first 200ms (hotkey release click)
+VAD_PRE_ROLL_CHUNKS = 4             # Keep 400ms before speech onset
+VAD_END_SILENCE_CHUNKS = 14         # Auto-stop after 1.4s of silence post-speech
+VAD_TRAILING_KEEP_CHUNKS = 4        # Keep 400ms of trailing silence after speech
+VAD_NO_SPEECH_TIMEOUT_CHUNKS = 80   # Cancel after 8.0s if user never speaks
+
+
+def _frame_rms_and_peak(pcm_bytes: bytes) -> tuple[float, int]:
+    """Return ``(rms, peak)`` of 16-bit signed mono PCM bytes."""
+    n = len(pcm_bytes) // 2
+    if n == 0:
+        return 0.0, 0
+    samples = memoryview(pcm_bytes[: n * 2]).cast("h")
+    total_sq = 0
+    peak = 0
+    for s in samples:
+        a = -s if s < 0 else s
+        if a > peak:
+            peak = a
+        total_sq += s * s
+    return (total_sq / n) ** 0.5, peak
+
 
 class WAVEFORMATEX(ctypes.Structure):
     _fields_ = [
@@ -139,33 +163,51 @@ _winmm.waveInClose.restype = wintypes.UINT
 
 
 class Win32MicRecorder:
-    """Records 16 kHz 16-bit mono PCM audio from the default Windows microphone."""
+    """Records 16 kHz 16-bit mono PCM audio with automatic end-of-speech (VAD) detection."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._recording = False
         self._thread: threading.Thread | None = None
         self._frames: list[bytes] = []
+        self._trim_start_idx: int = 0
+        self._trim_end_idx: int | None = None
         self._open_event = threading.Event()
         self._open_error: str | None = None
+        self._auto_stop_cb: Callable[[str], None] | None = None
 
     @property
     def is_recording(self) -> bool:
         return self._recording
 
-    def start(self) -> None:
-        """Open the default microphone and begin capturing 16 kHz mono PCM frames."""
+    def start(
+        self,
+        on_auto_stop: Callable[[str], None] | None = None,
+        auto_stop_on_silence: bool = True,
+    ) -> None:
+        """Open the default microphone and begin capturing 16 kHz mono PCM frames.
+
+        When *auto_stop_on_silence* is True (default), automatically stops recording
+        once the user speaks and then pauses for 1.4 seconds (like Google Voice Typing),
+        or after 8 seconds if no speech is detected, invoking ``on_auto_stop(reason)``.
+        """
         with self._lock:
             if self._recording:
                 return
             if _winmm.waveInGetNumDevs() == 0:
                 raise RuntimeError("No microphone input device found on this system.")
             self._frames = []
+            self._trim_start_idx = 0
+            self._trim_end_idx = None
             self._recording = True
+            self._auto_stop_cb = on_auto_stop
             self._open_event.clear()
             self._open_error = None
             self._thread = threading.Thread(
-                target=self._record_loop, daemon=True, name="win32-mic-recorder"
+                target=self._record_loop,
+                args=(auto_stop_on_silence,),
+                daemon=True,
+                name="win32-mic-recorder",
             )
             self._thread.start()
 
@@ -176,17 +218,27 @@ class Win32MicRecorder:
     def stop_and_save(self, wav_path: str) -> float:
         """Stop recording, write captured PCM to *wav_path*, and return duration in seconds."""
         with self._lock:
-            if not self._recording:
-                return 0.0
             self._recording = False
+            self._auto_stop_cb = None
             thread = self._thread
             self._thread = None
 
-        if thread is not None:
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=3.0)
 
-        pcm_data = b"".join(self._frames)
-        self._frames = []
+        with self._lock:
+            frames = self._frames
+            start_idx = self._trim_start_idx
+            end_idx = self._trim_end_idx
+            self._frames = []
+            self._trim_start_idx = 0
+            self._trim_end_idx = None
+
+        if not frames:
+            return 0.0
+
+        sliced = frames[start_idx:end_idx] if end_idx is not None else frames[start_idx:]
+        pcm_data = b"".join(sliced)
         duration_s = len(pcm_data) / float(SAMPLE_RATE * BYTES_PER_SAMPLE)
         if not pcm_data:
             return 0.0
@@ -198,7 +250,7 @@ class Win32MicRecorder:
             wf.writeframes(pcm_data)
         return duration_s
 
-    def _record_loop(self) -> None:
+    def _record_loop(self, auto_stop_on_silence: bool = True) -> None:
         wfx = WAVEFORMATEX()
         wfx.wFormatTag = WAVE_FORMAT_PCM
         wfx.nChannels = CHANNELS
@@ -228,6 +280,14 @@ class Win32MicRecorder:
         headers = [WAVEHDR() for _ in range(NUM_BUFFERS)]
         hdr_size = ctypes.sizeof(WAVEHDR)
 
+        # Adaptive VAD state
+        noise_floor = 160.0
+        speech_started = False
+        active_streak = 0
+        silence_streak = 0
+        chunk_count = 0
+        auto_stop_reason: str | None = None
+
         try:
             for i in range(NUM_BUFFERS):
                 headers[i].lpData = ctypes.cast(buffers[i], ctypes.c_char_p)
@@ -245,25 +305,83 @@ class Win32MicRecorder:
                         any_done = True
                         recorded = headers[i].dwBytesRecorded
                         if recorded > 0:
-                            self._frames.append(buffers[i].raw[:recorded])
+                            raw_chunk = buffers[i].raw[:recorded]
+                            self._frames.append(raw_chunk)
+                            chunk_count += 1
+
+                            if auto_stop_on_silence:
+                                rms, peak = _frame_rms_and_peak(raw_chunk)
+                                if not speech_started:
+                                    if chunk_count > VAD_IGNORE_INITIAL_CHUNKS:
+                                        onset_thresh = max(
+                                            380.0, min(1400.0, noise_floor * 2.8)
+                                        )
+                                        if rms >= onset_thresh and peak >= 950:
+                                            active_streak += 1
+                                            if active_streak >= 2:
+                                                speech_started = True
+                                                self._trim_start_idx = max(
+                                                    0,
+                                                    len(self._frames)
+                                                    - active_streak
+                                                    - VAD_PRE_ROLL_CHUNKS,
+                                                )
+                                                silence_streak = 0
+                                        else:
+                                            active_streak = 0
+                                            if rms < noise_floor * 2.0:
+                                                noise_floor = (
+                                                    0.85 * noise_floor
+                                                    + 0.15 * max(60.0, min(600.0, rms))
+                                                )
+                                        if (
+                                            not speech_started
+                                            and chunk_count >= VAD_NO_SPEECH_TIMEOUT_CHUNKS
+                                        ):
+                                            auto_stop_reason = "no_speech"
+                                            self._recording = False
+                                            break
+                                else:
+                                    cont_thresh = max(
+                                        250.0, min(1000.0, noise_floor * 1.85)
+                                    )
+                                    if rms >= cont_thresh:
+                                        silence_streak = 0
+                                    else:
+                                        silence_streak += 1
+                                        if silence_streak >= VAD_END_SILENCE_CHUNKS:
+                                            # Keep 400ms of trailing silence and trim the rest
+                                            trim_off = (
+                                                silence_streak - VAD_TRAILING_KEEP_CHUNKS
+                                            )
+                                            if trim_off > 0:
+                                                self._trim_end_idx = max(
+                                                    self._trim_start_idx + 1,
+                                                    len(self._frames) - trim_off,
+                                                )
+                                            auto_stop_reason = "speech_ended"
+                                            self._recording = False
+                                            break
+
                         headers[i].dwBytesRecorded = 0
                         headers[i].dwFlags &= ~WHDR_DONE
                         if self._recording:
                             _winmm.waveInAddBuffer(
                                 h_wave_in, ctypes.byref(headers[i]), hdr_size
                             )
-                if not any_done:
+                if not any_done and self._recording:
                     time.sleep(0.015)
 
             _winmm.waveInStop(h_wave_in)
             _winmm.waveInReset(h_wave_in)
 
-            # Drain any partial buffer flushed by waveInReset
-            for i in range(NUM_BUFFERS):
-                recorded = headers[i].dwBytesRecorded
-                if recorded > 0:
-                    self._frames.append(buffers[i].raw[:recorded])
-                    headers[i].dwBytesRecorded = 0
+            # Drain any partial buffer flushed by waveInReset (only if manually stopped)
+            if auto_stop_reason is None:
+                for i in range(NUM_BUFFERS):
+                    recorded = headers[i].dwBytesRecorded
+                    if recorded > 0:
+                        self._frames.append(buffers[i].raw[:recorded])
+                        headers[i].dwBytesRecorded = 0
         finally:
             for i in range(NUM_BUFFERS):
                 try:
@@ -273,6 +391,17 @@ class Win32MicRecorder:
                 except Exception:
                     pass
             _winmm.waveInClose(h_wave_in)
+
+        if auto_stop_reason is not None:
+            with self._lock:
+                cb = self._auto_stop_cb
+                self._auto_stop_cb = None
+                self._thread = None
+            if cb is not None:
+                try:
+                    cb(auto_stop_reason)
+                except Exception:
+                    pass
 
 
 # -- Win32 Clipboard Write + Ctrl+V Auto-Paste -------------------------------
@@ -600,7 +729,7 @@ def find_bark_python() -> str | None:
 class BarkCleanController:
     """Manages microphone recording, Bark 3.0 Clean sidecar lifecycle, and auto-paste."""
 
-    IDLE_UNLOAD_SECONDS = 600.0
+    IDLE_UNLOAD_SECONDS = 1800.0
 
     def __init__(self, daemon: TTSDaemon | None = None) -> None:
         self.daemon = daemon
@@ -608,6 +737,7 @@ class BarkCleanController:
         self._lock = threading.Lock()
         self._transcribing = False
         self._last_toggle_time = 0.0
+        self._on_complete_cb: Callable[[bool, str], None] | None = None
 
         # Sidecar subprocess state
         self._proc: subprocess.Popen | None = None
@@ -616,6 +746,13 @@ class BarkCleanController:
         self._result_event = threading.Event()
         self._last_result: dict | None = None
         self._idle_timer: threading.Timer | None = None
+
+        # Silently pre-warm the Bark 3.0 Clean worker 3s after daemon startup
+        # so the very first dictation transcribes in ~2s as soon as speech ends.
+        if self.daemon is not None:
+            prewarm = threading.Timer(3.0, self._ensure_worker_started)
+            prewarm.daemon = True
+            prewarm.start()
 
     @property
     def is_recording(self) -> bool:
@@ -645,23 +782,29 @@ class BarkCleanController:
             return "busy"
 
         if not self.recorder.is_recording:
-            self.start_dictation()
+            self.start_dictation(on_complete=on_complete)
             return "recording"
         else:
             self.stop_and_transcribe(on_complete=on_complete)
             return "transcribing"
 
-    def start_dictation(self) -> bool:
-        """Start capturing microphone audio and pre-warm the Bark 3.0 Clean worker."""
+    def start_dictation(
+        self, on_complete: Callable[[bool, str], None] | None = None
+    ) -> bool:
+        """Start capturing microphone audio with automatic end-of-speech detection."""
         if self.recorder.is_recording or self._transcribing:
             return False
         try:
+            self._on_complete_cb = on_complete
             if self.daemon is not None:
                 self.daemon.stop_audio()
-            self.recorder.start()
+            self.recorder.start(
+                on_auto_stop=self._on_vad_auto_stop,
+                auto_stop_on_silence=True,
+            )
             if self.daemon is not None:
                 self.daemon._set_status("Listening...", speaking=False)
-            # Pre-warm the Bark 3.0 Clean worker while the user speaks
+            # Ensure the Bark 3.0 Clean worker is warm while the user speaks
             threading.Thread(
                 target=self._ensure_worker_started,
                 daemon=True,
@@ -674,13 +817,34 @@ class BarkCleanController:
                 self.daemon._set_status("Ready", speaking=False)
             return False
 
+    def _on_vad_auto_stop(self, reason: str) -> None:
+        """Called by Win32MicRecorder when VAD detects end of speech or silence timeout."""
+        if reason == "speech_ended":
+            self.stop_and_transcribe(_from_vad=True)
+        else:
+            with self.recorder._lock:
+                self.recorder._frames = []
+            if self.daemon is not None:
+                self.daemon._set_status("Ready", speaking=False)
+            cb = self._on_complete_cb
+            self._on_complete_cb = None
+            if cb is not None:
+                try:
+                    cb(False, "No speech detected.")
+                except Exception:
+                    pass
+
     def stop_and_transcribe(
-        self, on_complete: Callable[[bool, str], None] | None = None
+        self,
+        on_complete: Callable[[bool, str], None] | None = None,
+        _from_vad: bool = False,
     ) -> None:
         """Stop microphone recording, run Bark 3.0 Clean, and paste the cleaned text."""
-        if not self.recorder.is_recording or self._transcribing:
+        if (not self.recorder.is_recording and not _from_vad) or self._transcribing:
             return
         self._transcribing = True
+        if on_complete is not None:
+            self._on_complete_cb = on_complete
         if self.daemon is not None:
             self.daemon._set_status("Transcribing...", speaking=False)
 
@@ -718,9 +882,11 @@ class BarkCleanController:
                 self._transcribing = False
                 if self.daemon is not None:
                     self.daemon._set_status("Ready", speaking=False)
-                if on_complete is not None:
+                cb = self._on_complete_cb
+                self._on_complete_cb = None
+                if cb is not None:
                     try:
-                        on_complete(ok, out_msg)
+                        cb(ok, out_msg)
                     except Exception:
                         pass
 
@@ -839,7 +1005,7 @@ class BarkCleanController:
                 if (
                     status_str
                     and self.daemon is not None
-                    and not self.recorder.is_recording
+                    and self._transcribing
                 ):
                     self.daemon._set_status(status_str, speaking=False)
             elif mtype == "ready":
