@@ -1,17 +1,18 @@
 """
-Floating non-activating audio visualizer HUD pill for Bark 3.0 Clean dictation.
+Floating non-activating audio visualizer and learned-word HUD pill for Bark 3.0 Clean dictation.
 
 Renders a borderless, click-through Windows 11 monochrome pill near the bottom
-of the screen whenever microphone dictation is active:
+of the screen whenever microphone dictation is active or when a word correction
+is saved to the STT vocabulary:
   - Uses Win32 ``WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST``
     so it NEVER steals keyboard focus from the active input field and mouse clicks
     pass straight through it.
   - Automatically adapts to the active WinUI 3 theme (Device System, Dark, or Light):
-    dark mode renders white equalizer bars inside a borderless black capsule;
-    light mode inverts to black equalizer bars inside a borderless white capsule.
-  - Animates 9 real-time audio-reactive visualizer bars at 25 FPS driven by the
-    microphone's live RMS amplitude while recording, and a smooth wave animation
-    while Bark 3.0 Clean is transcribing.
+    dark mode renders white equalizer bars / text inside a borderless black capsule;
+    light mode inverts to black equalizer bars / text inside a borderless white capsule.
+  - Animates 9 real-time audio-reactive visualizer bars at 25 FPS while recording,
+    a smooth wave animation while transcribing, and a minimal ``✓ Saved: heard → written``
+    confirmation pill for 2.4s whenever Audify learns a word correction.
 """
 
 from __future__ import annotations
@@ -80,17 +81,17 @@ def _draw_rounded_rect(
 
 
 class DictationVisualizerHUD:
-    """Click-through, non-focus-stealing floating audio visualizer pill."""
+    """Click-through, non-focus-stealing floating audio visualizer and learned-word pill."""
 
     def __init__(self, stt: BarkCleanController) -> None:
         self.stt = stt
         self._lock = threading.Lock()
         self._started = False
         self._visible_requested = False
+        self._toast_text: str = ""
+        self._toast_until: float = 0.0
 
-    def show(self) -> None:
-        """Request the visualizer HUD to appear (spawning its thread on first use)."""
-        self._visible_requested = True
+    def _ensure_thread_started(self) -> None:
         with self._lock:
             if not self._started:
                 self._started = True
@@ -100,9 +101,29 @@ class DictationVisualizerHUD:
                     name="stt-visualizer-hud",
                 ).start()
 
+    def show(self) -> None:
+        """Request the visualizer HUD to appear (spawning its thread on first use)."""
+        self._visible_requested = True
+        self._ensure_thread_started()
+
     def hide(self) -> None:
         """Request the visualizer HUD to hide."""
         self._visible_requested = False
+
+    def show_learned(self, heard: str, written: str, duration_s: float = 2.4) -> None:
+        """Show a minimal non-obstructive confirmation in the pill when a word fix is learned."""
+        h_clean = (heard or "").strip()
+        w_clean = (written or "").strip()
+        if not h_clean or not w_clean:
+            return
+        if len(h_clean) > 22:
+            h_clean = h_clean[:20] + "…"
+        if len(w_clean) > 22:
+            w_clean = w_clean[:20] + "…"
+        with self._lock:
+            self._toast_text = f"✓  Saved: {h_clean} → {w_clean}"
+            self._toast_until = time.monotonic() + float(duration_s)
+        self._ensure_thread_started()
 
     def _current_palette(self) -> dict[str, str]:
         """Resolve the active WinUI 3 palette from daemon config ('system', 'light', or 'dark')."""
@@ -174,19 +195,20 @@ class DictationVisualizerHUD:
         dot_bar_gap = S(8)
 
         pill_w = pad_x + (2 * dot_r) + dot_bar_gap + bars_total_w + pad_x
-        w = int(round(pill_w + S(4)))
+        viz_w = int(round(pill_w + S(4)))
+        cur_w = [viz_w]
         h = S(36)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        x = (sw - w) // 2
+        x = (sw - viz_w) // 2
         y = sh - h - S(64)
-        root.geometry(f"{w}x{h}+{x}+{y}")
+        root.geometry(f"{viz_w}x{h}+{x}+{y}")
         root.update_idletasks()
         hwnd = self._apply_noactivate_clickthrough(root)
 
         canvas = tk.Canvas(
             root,
-            width=w,
+            width=viz_w,
             height=h,
             bg=key_color,
             highlightthickness=0,
@@ -202,7 +224,7 @@ class DictationVisualizerHUD:
             canvas,
             S(2),
             S(2),
-            w - S(2),
+            viz_w - S(2),
             h - S(2),
             pill_r,
             fill=pal["pill_bg"],
@@ -234,13 +256,44 @@ class DictationVisualizerHUD:
             )
             bar_ids.append(bid)
 
+        toast_text_id = canvas.create_text(
+            viz_w // 2,
+            dot_cy,
+            text="",
+            fill=pal["pill_bar_active"],
+            font=("Segoe UI Semibold", 9),
+            anchor="center",
+            state="hidden",
+        )
+
         is_shown = [False]
+        in_toast_layout = [False]
         u32 = ctypes.windll.user32
+
+        def _set_pill_width(target_w: int) -> None:
+            if cur_w[0] == target_w:
+                return
+            cur_w[0] = target_w
+            nx = (sw - target_w) // 2
+            root.geometry(f"{target_w}x{h}+{nx}+{y}")
+            canvas.configure(width=target_w)
+            pts = _rounded_rect_points(
+                S(2), S(2), target_w - S(2), h - S(2), pill_r
+            )
+            canvas.coords(pill_id, *pts)
 
         def _tick() -> None:
             rec = self.stt.is_recording
             trans = self.stt.is_transcribing
-            should_show = self._visible_requested or rec or trans
+            with self._lock:
+                t_text = self._toast_text
+                t_until = self._toast_until
+            toast_active = (
+                (not rec and not trans)
+                and bool(t_text)
+                and (time.monotonic() < t_until)
+            )
+            should_show = self._visible_requested or rec or trans or toast_active
 
             if not should_show:
                 if is_shown[0]:
@@ -261,6 +314,31 @@ class DictationVisualizerHUD:
                     pass
             canvas.itemconfig(pill_id, fill=pal_now["pill_bg"], outline="")
 
+            if toast_active and not (rec or trans):
+                if not in_toast_layout[0]:
+                    in_toast_layout[0] = True
+                    canvas.itemconfig(dot_id, state="hidden")
+                    for bid in bar_ids:
+                        canvas.itemconfig(bid, state="hidden")
+                    canvas.itemconfig(toast_text_id, state="normal")
+
+                canvas.itemconfig(
+                    toast_text_id, text=t_text, fill=pal_now["pill_bar_active"]
+                )
+                bbox = canvas.bbox(toast_text_id)
+                text_px = (bbox[2] - bbox[0]) if bbox else S(140)
+                target_w = max(viz_w, int(round(text_px + 2 * S(16) + S(4))))
+                _set_pill_width(target_w)
+                canvas.coords(toast_text_id, target_w // 2, dot_cy)
+            else:
+                if in_toast_layout[0]:
+                    in_toast_layout[0] = False
+                    canvas.itemconfig(toast_text_id, state="hidden")
+                    canvas.itemconfig(dot_id, state="normal")
+                    for bid in bar_ids:
+                        canvas.itemconfig(bid, state="normal")
+                _set_pill_width(viz_w)
+
             if not is_shown[0]:
                 is_shown[0] = True
                 try:
@@ -276,6 +354,10 @@ class DictationVisualizerHUD:
                     )
                 except Exception:
                     root.deiconify()
+
+            if toast_active and not (rec or trans):
+                root.after(60, _tick)
+                return
 
             t = time.perf_counter()
             max_half_h = S(10.5)
@@ -302,7 +384,6 @@ class DictationVisualizerHUD:
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)
                     lvl = levels[i] if i < len(levels) else 0.0
-                    # Center bars respond higher for a natural equalizer profile
                     center_weight = 1.0 - 0.12 * abs(i - (num_bars // 2))
                     idle_wave = 0.14 + 0.08 * math.sin(t * 4.2 + i * 0.65)
                     eff = max(idle_wave, min(1.0, lvl * center_weight * 1.25))

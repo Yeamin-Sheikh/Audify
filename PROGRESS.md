@@ -13,6 +13,22 @@
 
 ## Progress log
 
+### 2026-10-26, v2.9.13 Minimal learned-word confirmation pill in HUD
+
+**Duration:** ~3m
+**Status:** Done
+
+#### What changed
+- Extended `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) with `show_learned(heard, written, duration_s=2.4)` so when a word correction is auto-learned by `DictationCorrectionLearner` (`audify/stt.py`) or saved in the STT Vocabulary tab (`audify/gui/control_center.py`), the bottom floating pill briefly shows a minimal, click-through `✓  Saved: heard → written` confirmation without stealing focus or obstructing the screen.
+- Bumped version to `2.9.13`.
+
+#### Files touched
+- `audify/gui/stt_hud.py`, added `show_learned()` toast layout inside the floating HUD pill.
+- `audify/stt.py`, `audify/gui/control_center.py`, wired `hud.show_learned()` on STT vocabulary save/auto-learn.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.13`.
+
+---
+
 ### 2026-10-26, v2.9.12 WinUI 3 Settings redesign, System/Light/Dark themes, borderless HUD pill, and self-bootstrapping Bark runtime
 
 **Duration:** ~8m

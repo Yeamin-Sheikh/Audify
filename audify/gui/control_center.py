@@ -1244,6 +1244,12 @@ def _run_settings_window(daemon: Any) -> None:
             with config_lock:
                 if active_mode[0] == "stt":
                     set_stt_vocab_rule(daemon.config, w, s)
+                    try:
+                        stt_obj = getattr(daemon, "stt", None)
+                        if stt_obj is not None and hasattr(stt_obj, "hud"):
+                            stt_obj.hud.show_learned(w, s)
+                    except Exception:
+                        pass
                 else:
                     set_rule(daemon.config, w, s)
                     save_config(daemon.config)

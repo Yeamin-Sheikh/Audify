@@ -938,6 +938,10 @@ class DictationCorrectionLearner:
                 self.daemon.stt.last_dictated = pat.sub(
                     replacement, self.daemon.stt.last_dictated
                 )
+            try:
+                self.daemon.stt.hud.show_learned(heard, replacement)
+            except Exception:
+                pass
             print(f"[STT Auto-Learn] Learned correction: '{heard}' -> '{replacement}'")
             self.daemon._set_status(
                 f"Learned: {heard} -> {replacement}", speaking=False

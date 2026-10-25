@@ -202,6 +202,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.13
+
+- **Minimal Learned-Word Confirmation Pill**: whenever Audify auto-learns a word correction (or when you save an STT vocabulary rule), the floating bottom pill (`audify/gui/stt_hud.py`) briefly displays a non-obstructive, click-through `✓  Saved: heard → written` confirmation for 2.4 seconds in the exact same spot as the dictation visualizer.
+
 ### v2.9.12
 
 - **Renamed Control Center to Settings & Redesigned with WinUI 3 Styling**: updated the window title (`Audify Settings`), sidebar header (`Settings`), and tray menu (`Settings...`) to use authentic Windows 11 WinUI 3 surface, control, and typography tokens (`audify/gui/theme.py`, `audify/gui/control_center.py`, `audify/gui/widgets.py`).
