@@ -38,13 +38,13 @@ SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 
 _TRANSPARENT_KEY = "#010101"
-_PILL_BG = "#16161a"
-_BORDER_LISTEN = "#10b981"
-_BORDER_TRANSCRIBE = "#38bdf8"
-_BAR_LISTEN = "#34d399"
-_BAR_SPEAKING = "#10b981"
-_BAR_TRANSCRIBE = "#38bdf8"
-_TEXT_FG = "#f4f4f5"
+_PILL_BG = "#0d0d0f"
+_BORDER_LISTEN = "#52525b"
+_BORDER_TRANSCRIBE = "#a1a1aa"
+_BAR_LISTEN = "#d4d4d8"
+_BAR_SPEAKING = "#ffffff"
+_BAR_TRANSCRIBE = "#e4e4e7"
+_TEXT_FG = "#fafafa"
 _SUB_FG = "#a1a1aa"
 
 
@@ -270,7 +270,7 @@ class DictationVisualizerHUD:
             else:
                 levels = list(getattr(self.stt.recorder, "level_bars", ()))
                 pulse = 0.5 + 0.5 * math.sin(t * 5.0)
-                dot_col = "#34d399" if pulse > 0.45 else "#059669"
+                dot_col = "#ffffff" if pulse > 0.45 else "#71717a"
                 canvas.itemconfig(pill_id, outline=_BORDER_LISTEN)
                 canvas.itemconfig(dot_id, fill=dot_col)
 

@@ -13,6 +13,22 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.11 Monochrome black-and-white dictation visualizer
+
+**Duration:** ~3m
+**Status:** Done
+
+#### What changed
+- Restyled `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) and `create_recording_visualizer_icon` (`audify/tray.py`) to a professional monochrome black-and-white palette (`#0d0d0f` matte black background, `#52525b`/`#a1a1aa` borders, and `#ffffff`/`#d4d4d8` bars).
+- Bumped version to `2.9.11`.
+
+#### Files touched
+- `audify/gui/stt_hud.py`, updated visualizer palette to monochrome black and white.
+- `audify/tray.py`, updated recording/transcribing tray visualizer disc to monochrome charcoal/obsidian with white bars.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.11`.
+
+---
+
 ### 2026-10-25, v2.9.10 Compact floating dictation visualizer pill
 
 **Duration:** ~3m

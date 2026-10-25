@@ -79,7 +79,7 @@ _SUPERSAMPLE = 4
 _DISC_COLORS = {
     "ready": ((99, 102, 241), (139, 92, 246)),      # indigo -> violet
     "speaking": ((56, 189, 248), (99, 102, 241)),   # sky -> indigo, brighter while talking
-    "recording": ((16, 185, 129), (5, 150, 105)),   # emerald green while recording dictation
+    "recording": ((36, 36, 40), (14, 14, 16)),      # monochrome obsidian while recording dictation
     "paused": ((120, 120, 128), (72, 72, 80)),      # neutral grey
 }
 
@@ -149,7 +149,7 @@ def create_recording_visualizer_icon(
     palette_key = "transcribing" if transcribing else "recording"
     if palette_key not in _disc_base_cache:
         top, bottom = (
-            ((14, 165, 233), (37, 99, 235))
+            ((63, 63, 70), (24, 24, 27))
             if transcribing
             else _DISC_COLORS["recording"]
         )

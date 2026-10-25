@@ -1,6 +1,6 @@
 [Setup]
 AppName=Audify
-AppVersion=2.9.10
+AppVersion=2.9.11
 AppPublisher=Sheikh Technologies
 DefaultDirName={autopf}\Audify
 DefaultGroupName=Audify
@@ -8,7 +8,7 @@ UninstallDisplayIcon={app}\logo.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=Setup_Audify_2.9.10
+OutputBaseFilename=Setup_Audify_2.9.11
 SetupIconFile=logo.ico
 ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
