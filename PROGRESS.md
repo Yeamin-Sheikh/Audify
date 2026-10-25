@@ -13,6 +13,21 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.10 Compact floating dictation visualizer pill
+
+**Duration:** ~3m
+**Status:** Done
+
+#### What changed
+- Shrunk `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) from `236×46 px` to a tight, symmetrical `98×36 px` capsule containing only the pulsing status dot and the 9 audio-reactive equalizer bars, eliminating the wide right-hand text/blank area.
+- Bumped version to `2.9.10`.
+
+#### Files touched
+- `audify/gui/stt_hud.py`, tightened pill geometry around the status dot and 9 visualizer bars.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.10`.
+
+---
+
 ### 2026-10-25, v2.9.9 Double Left Ctrl trigger, Escape focus guard, adjustable silence delay, and live audio visualizer
 
 **Duration:** ~12m

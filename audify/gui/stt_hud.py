@@ -48,16 +48,14 @@ _TEXT_FG = "#f4f4f5"
 _SUB_FG = "#a1a1aa"
 
 
-def _draw_rounded_rect(
-    canvas: tk.Canvas,
+def _rounded_rect_points(
     x1: float,
     y1: float,
     x2: float,
     y2: float,
     r: float,
-    **kwargs,
-) -> int:
-    points = [
+) -> list[float]:
+    return [
         x1 + r, y1,
         x2 - r, y1,
         x2, y1,
@@ -71,6 +69,18 @@ def _draw_rounded_rect(
         x1, y1 + r,
         x1, y1,
     ]
+
+
+def _draw_rounded_rect(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    r: float,
+    **kwargs,
+) -> int:
+    points = _rounded_rect_points(x1, y1, x2, y2, r)
     return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
@@ -145,8 +155,17 @@ class DictationVisualizerHUD:
         def S(px: float) -> int:
             return max(1, int(round(px * scale)))
 
-        w = S(236)
-        h = S(46)
+        num_bars = 9
+        bar_w = S(3.5)
+        bar_gap = S(3.0)
+        bars_total_w = num_bars * bar_w + (num_bars - 1) * bar_gap
+        dot_r = S(4.0)
+        pad_x = S(13)
+        dot_bar_gap = S(8)
+
+        pill_w = pad_x + (2 * dot_r) + dot_bar_gap + bars_total_w + pad_x
+        w = int(round(pill_w + S(4)))
+        h = S(36)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         x = (sw - w) // 2
@@ -165,36 +184,32 @@ class DictationVisualizerHUD:
         )
         canvas.pack(fill=tk.BOTH, expand=True)
 
+        pill_r = (h - S(4)) // 2
+        dot_cy = h // 2
+
         pill_id = _draw_rounded_rect(
             canvas,
             S(2),
             S(2),
             w - S(2),
             h - S(2),
-            S(21),
+            pill_r,
             fill=_PILL_BG,
             outline=_BORDER_LISTEN,
             width=max(1, S(1.5)),
         )
 
-        # Status dot on the left
-        dot_r = S(4.5)
-        dot_cx = S(20)
-        dot_cy = h // 2
+        dcx = S(2) + pad_x + dot_r
         dot_id = canvas.create_oval(
-            dot_cx - dot_r,
+            dcx - dot_r,
             dot_cy - dot_r,
-            dot_cx + dot_r,
+            dcx + dot_r,
             dot_cy + dot_r,
             fill=_BAR_LISTEN,
             outline="",
         )
 
-        # 9 vertical audio visualizer bars
-        num_bars = 9
-        bar_w = S(3.5)
-        bar_gap = S(3.0)
-        bars_start_x = S(35)
+        bars_start_x = int(round(dcx + dot_r + dot_bar_gap))
         bar_ids: list[int] = []
         for i in range(num_bars):
             bx = bars_start_x + i * (bar_w + bar_gap)
@@ -207,17 +222,6 @@ class DictationVisualizerHUD:
                 outline="",
             )
             bar_ids.append(bid)
-
-        # Status text on the right
-        text_x = bars_start_x + num_bars * (bar_w + bar_gap) + S(8)
-        label_id = canvas.create_text(
-            text_x,
-            dot_cy,
-            text="Listening...",
-            anchor=tk.W,
-            fill=_TEXT_FG,
-            font=("Segoe UI Semibold", 9),
-        )
 
         is_shown = [False]
         u32 = ctypes.windll.user32
@@ -251,31 +255,24 @@ class DictationVisualizerHUD:
                     root.deiconify()
 
             t = time.perf_counter()
-            max_half_h = S(13.0)
+            max_half_h = S(10.5)
             min_half_h = S(2.5)
 
             if trans:
                 canvas.itemconfig(pill_id, outline=_BORDER_TRANSCRIBE)
                 canvas.itemconfig(dot_id, fill=_BAR_TRANSCRIBE)
-                canvas.itemconfig(label_id, text="Transcribing...", fill=_TEXT_FG)
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)
                     wave_v = 0.5 + 0.5 * math.sin(t * 7.5 - i * 0.55)
-                    hh = min_half_h + wave_v * (max_half_h * 0.75 - min_half_h)
+                    hh = min_half_h + wave_v * (max_half_h * 0.78 - min_half_h)
                     canvas.coords(bid, bx, dot_cy - hh, bx + bar_w, dot_cy + hh)
                     canvas.itemconfig(bid, fill=_BAR_TRANSCRIBE)
             else:
                 levels = list(getattr(self.stt.recorder, "level_bars", ()))
-                speaking = getattr(self.stt.recorder, "speech_detected", False)
                 pulse = 0.5 + 0.5 * math.sin(t * 5.0)
                 dot_col = "#34d399" if pulse > 0.45 else "#059669"
                 canvas.itemconfig(pill_id, outline=_BORDER_LISTEN)
                 canvas.itemconfig(dot_id, fill=dot_col)
-                canvas.itemconfig(
-                    label_id,
-                    text="Speaking..." if speaking else "Listening...",
-                    fill=_TEXT_FG,
-                )
 
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)

@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.9.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.10.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -199,6 +199,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.10
+
+- **Compact Floating Visualizer Pill**: removed the wide right-side text area from `DictationVisualizerHUD` in `audify/gui/stt_hud.py` so the floating HUD pill tightly wraps just the pulsing status dot and the 9 live equalizer bars (`98×36 px` scaled, green while listening/speaking and sky-blue wave while transcribing) with symmetric padding and zero wasted horizontal space.
 
 ### v2.9.9
 
