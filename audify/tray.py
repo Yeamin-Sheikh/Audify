@@ -182,6 +182,11 @@ def _dictation_hotkey_display_name(daemon: TTSDaemon) -> str:
     return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
 
 
+def _paste_last_hotkey_display_name(daemon: TTSDaemon) -> str:
+    hotkey = str(daemon.config.get("paste_last_hotkey", "ctrl+alt+v"))
+    return "+".join(part.strip().capitalize() for part in hotkey.split("+"))
+
+
 # -- Main setup ---------------------------------------------------------------
 
 def setup_tray() -> None:
@@ -247,6 +252,10 @@ def setup_tray() -> None:
     def on_toggle_dictation(icon: pystray.Icon, item_action: item) -> None:
         """Toggle Underdog Bark 3.0 Clean speech-to-text dictation."""
         daemon.toggle_dictation()
+
+    def on_paste_last_dictation(icon: pystray.Icon, item_action: item) -> None:
+        """Re-paste the most recently dictated speech."""
+        daemon.paste_last_dictation()
 
     def on_toggle_skip_code(icon: pystray.Icon, item_action: item) -> None:
         daemon.toggle_skip_code_blocks()
@@ -370,6 +379,11 @@ def setup_tray() -> None:
                 ),
                 on_toggle_dictation,
                 enabled=lambda i: not daemon.stt.is_transcribing,
+            ),
+            item(
+                lambda text: f"Paste Last Dictation\t{_paste_last_hotkey_display_name(daemon)}",
+                on_paste_last_dictation,
+                enabled=lambda i: bool(daemon.stt.last_dictated),
             ),
             Menu.SEPARATOR,
             # Voice settings with the current value right-aligned

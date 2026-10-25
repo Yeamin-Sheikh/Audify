@@ -13,6 +13,27 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.7 Customizable global shortcuts and Paste Last Dictation
+
+**Duration:** ~6m
+**Status:** Done
+
+#### What changed
+- Added **Paste Last Dictation** (`paste_last_dictation()` in `audify/stt.py` and `audify/engine.py`, default hotkey `Ctrl+Alt+V` in `audify/config.py`, plus **Paste Last Dictation** in `audify/tray.py`) so if the user's cursor missed the target input box when dictating, pressing `Ctrl+Alt+V` re-pastes the last dictated text without triggering TTS readback.
+- Added interactive click-to-record shortcut badges in the Control Center sidebar footer (`audify/gui/control_center.py`) for `Dictate (Bark 3.0)`, `Paste last dictation`, and `Stop playback`, backed by live Win32 hotkey rebinding (`WM_APP_REBIND_HOTKEYS` in `audify/clipboard.py` and `TTSDaemon.set_hotkey()` in `audify/engine.py`).
+- Bumped version to `2.9.7`.
+
+#### Files touched
+- `audify/config.py`, added `"paste_last_hotkey": "ctrl+alt+v"`.
+- `audify/clipboard.py`, added `HOTKEY_ID_PASTE_LAST`, `WM_APP_REBIND_HOTKEYS`, expanded `parse_win32_hotkey`, and added `rebind_hotkeys()`.
+- `audify/stt.py`, added `last_dictated` tracking, `paste_last_dictation()`, and modifier-release wait in `send_ctrl_v()`.
+- `audify/engine.py`, added `_is_paste_last_combo_down()`, `paste_last_dictation()`, and `set_hotkey()`.
+- `audify/tray.py`, added **Paste Last Dictation** menu item.
+- `audify/gui/control_center.py`, added click-to-record shortcut badges in the sidebar footer.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.7`.
+
+---
+
 ### 2026-10-25, v2.9.6 Google-style automatic end-of-speech (VAD) detection for Bark 3.0 Clean
 
 **Duration:** ~8m

@@ -59,9 +59,15 @@ def _selftest(report_path: str) -> int:
             on_stop_hotkey=lambda: None,
             dictation_hotkey="ctrl+alt+f11",
             on_dictation_hotkey=lambda: None,
+            paste_last_hotkey="ctrl+alt+f10",
+            on_paste_last_hotkey=lambda: None,
         )
         listener.start()
-        hotkey_ok = listener._hotkey_registered and listener._dictation_hotkey_registered
+        hotkey_ok = (
+            listener._hotkey_registered
+            and listener._dictation_hotkey_registered
+            and listener._paste_last_hotkey_registered
+        )
         listener.stop()
         if not hotkey_ok:
             raise RuntimeError("Win32 RegisterHotKey failed on message window")

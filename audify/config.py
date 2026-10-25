@@ -194,6 +194,7 @@ DEFAULT_CONFIG: dict = {
     "skip_code_blocks": True,
     "stop_hotkey": "ctrl+alt+s",
     "dictation_hotkey": "ctrl+alt+d",
+    "paste_last_hotkey": "ctrl+alt+v",
     "pronunciation_dict": {},
     # Built-in rules the user deleted; never re-added on startup
     "removed_default_rules": [],

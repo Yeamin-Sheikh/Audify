@@ -24,6 +24,7 @@ WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
 WM_HOTKEY = 0x0312
 WM_CLIPBOARDUPDATE = 0x031D
+WM_APP_REBIND_HOTKEYS = 0x8001
 HWND_MESSAGE = wintypes.HWND(-3)  # Message-only window (no taskbar icon)
 CF_UNICODETEXT = 13
 
@@ -35,6 +36,7 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 HOTKEY_ID_STOP = 1
 HOTKEY_ID_DICTATION = 2
+HOTKEY_ID_PASTE_LAST = 3
 
 # Win32 Virtual-Key codes for direct physical state queries via GetAsyncKeyState
 VK_LBUTTON = 0x01
@@ -214,6 +216,33 @@ def parse_win32_hotkey(hotkey_str: str) -> tuple[int, int] | None:
         "insert": VK_INSERT,
         "del": VK_DELETE,
         "delete": VK_DELETE,
+        "tab": 0x09,
+        "backspace": 0x08,
+        "back": 0x08,
+        "pageup": 0x21,
+        "prior": 0x21,
+        "pagedown": 0x22,
+        "next": 0x22,
+        "end": 0x23,
+        "home": 0x24,
+        "left": 0x25,
+        "up": 0x26,
+        "right": 0x27,
+        "down": 0x28,
+        "`": 0xC0,
+        "grave": 0xC0,
+        "-": 0xBD,
+        "minus": 0xBD,
+        "=": 0xBB,
+        "equal": 0xBB,
+        "[": 0xDB,
+        "]": 0xDD,
+        "\\": 0xDC,
+        ";": 0xBA,
+        "'": 0xDE,
+        ",": 0xBC,
+        ".": 0xBE,
+        "/": 0xBF,
     }
     if key_part in special_vks:
         vk = special_vks[key_part]
@@ -279,12 +308,16 @@ class ClipboardListener:
         on_stop_hotkey: Callable[[], None] | None = None,
         dictation_hotkey: str = "ctrl+alt+d",
         on_dictation_hotkey: Callable[[], None] | None = None,
+        paste_last_hotkey: str = "ctrl+alt+v",
+        on_paste_last_hotkey: Callable[[], None] | None = None,
     ) -> None:
         self.on_text_change = on_text_change
         self.stop_hotkey = stop_hotkey
         self.on_stop_hotkey = on_stop_hotkey
         self.dictation_hotkey = dictation_hotkey
         self.on_dictation_hotkey = on_dictation_hotkey
+        self.paste_last_hotkey = paste_last_hotkey
+        self.on_paste_last_hotkey = on_paste_last_hotkey
         self._hwnd: int | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -295,9 +328,60 @@ class ClipboardListener:
         self._last_update_time: float = 0.0
         self._hotkey_registered: bool = False
         self._dictation_hotkey_registered: bool = False
+        self._paste_last_hotkey_registered: bool = False
+
+    def _unbind_all_hotkeys(self, hwnd: int) -> None:
+        if self._hotkey_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_STOP)
+            self._hotkey_registered = False
+        if self._dictation_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_DICTATION)
+            self._dictation_hotkey_registered = False
+        if self._paste_last_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST)
+            self._paste_last_hotkey_registered = False
+
+    def _bind_all_hotkeys(self, hwnd: int) -> None:
+        self._unbind_all_hotkeys(hwnd)
+        parsed = parse_win32_hotkey(self.stop_hotkey)
+        if parsed and self.on_stop_hotkey:
+            mods, vk = parsed
+            if user32.RegisterHotKey(hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
+                self._hotkey_registered = True
+
+        parsed_dict = parse_win32_hotkey(self.dictation_hotkey)
+        if parsed_dict and self.on_dictation_hotkey:
+            d_mods, d_vk = parsed_dict
+            if user32.RegisterHotKey(hwnd, HOTKEY_ID_DICTATION, d_mods | MOD_NOREPEAT, d_vk):
+                self._dictation_hotkey_registered = True
+
+        parsed_paste = parse_win32_hotkey(self.paste_last_hotkey)
+        if parsed_paste and self.on_paste_last_hotkey:
+            p_mods, p_vk = parsed_paste
+            if user32.RegisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST, p_mods | MOD_NOREPEAT, p_vk):
+                self._paste_last_hotkey_registered = True
+
+    def rebind_hotkeys(
+        self,
+        stop_hotkey: str | None = None,
+        dictation_hotkey: str | None = None,
+        paste_last_hotkey: str | None = None,
+    ) -> None:
+        """Update hotkey strings and re-register them on the Win32 message-pump thread."""
+        if stop_hotkey is not None:
+            self.stop_hotkey = stop_hotkey
+        if dictation_hotkey is not None:
+            self.dictation_hotkey = dictation_hotkey
+        if paste_last_hotkey is not None:
+            self.paste_last_hotkey = paste_last_hotkey
+        if self._hwnd:
+            user32.PostMessageW(self._hwnd, WM_APP_REBIND_HOTKEYS, 0, 0)
 
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         """Win32 window procedure. Handles clipboard updates and native global hotkeys."""
+        if msg == WM_APP_REBIND_HOTKEYS:
+            self._bind_all_hotkeys(hwnd)
+            return 0
         if msg == WM_HOTKEY:
             if wparam == HOTKEY_ID_STOP and self.on_stop_hotkey:
                 try:
@@ -307,6 +391,11 @@ class ClipboardListener:
             elif wparam == HOTKEY_ID_DICTATION and self.on_dictation_hotkey:
                 try:
                     self.on_dictation_hotkey()
+                except Exception:
+                    pass
+            elif wparam == HOTKEY_ID_PASTE_LAST and self.on_paste_last_hotkey:
+                try:
+                    self.on_paste_last_hotkey()
                 except Exception:
                     pass
             return 0
@@ -362,19 +451,8 @@ class ClipboardListener:
             self._ready.set()
             return
 
-        # Register native Win32 global stop hotkey (e.g. Ctrl+Alt+S) on this message pump
-        parsed = parse_win32_hotkey(self.stop_hotkey)
-        if parsed and self.on_stop_hotkey:
-            mods, vk = parsed
-            if user32.RegisterHotKey(self._hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
-                self._hotkey_registered = True
-
-        # Register native Win32 global dictation hotkey (e.g. Ctrl+Alt+D) on this message pump
-        parsed_dict = parse_win32_hotkey(self.dictation_hotkey)
-        if parsed_dict and self.on_dictation_hotkey:
-            d_mods, d_vk = parsed_dict
-            if user32.RegisterHotKey(self._hwnd, HOTKEY_ID_DICTATION, d_mods | MOD_NOREPEAT, d_vk):
-                self._dictation_hotkey_registered = True
+        # Register native Win32 global hotkeys (stop, dictation, paste-last) on this message pump
+        self._bind_all_hotkeys(self._hwnd)
 
         # Snapshot current clipboard so we don't fire on startup
         try:
@@ -392,12 +470,7 @@ class ClipboardListener:
             user32.DispatchMessageW(ctypes.byref(msg))
 
         # Cleanup
-        if self._hotkey_registered:
-            user32.UnregisterHotKey(self._hwnd, HOTKEY_ID_STOP)
-            self._hotkey_registered = False
-        if self._dictation_hotkey_registered:
-            user32.UnregisterHotKey(self._hwnd, HOTKEY_ID_DICTATION)
-            self._dictation_hotkey_registered = False
+        self._unbind_all_hotkeys(self._hwnd)
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.UnregisterClassW(self._class_name, h_inst)
 

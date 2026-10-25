@@ -222,12 +222,12 @@ def _run_control_center(daemon: Any) -> None:
 
     root.update_idletasks()
     _apply_dark_title_bar(root)
-    width, height = S(1020), S(690)
+    width, height = S(1020), S(730)
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.resizable(True, True)
-    root.minsize(S(880), S(630))
+    root.minsize(S(880), S(660))
 
     _configure_styles(root, S)
 
@@ -476,30 +476,124 @@ def _run_control_center(daemon: Any) -> None:
 
     tools_status_lbl.pack(anchor=tk.W)
 
-    # Footer: stop hotkey hint + version
+    # Footer: customizable global shortcuts + version
     footer = tk.Frame(sidebar, bg=CARD_COLOR)
     footer.pack(side=tk.BOTTOM, fill=tk.X)
-    tk.Frame(footer, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(0, S(14)))
-    dict_hotkey_row = tk.Frame(footer, bg=CARD_COLOR)
-    dict_hotkey_row.pack(fill=tk.X, pady=(0, S(6)))
-    ttk.Label(dict_hotkey_row, text="Dictate (Bark 3.0)", style="CardSub.TLabel").pack(side=tk.LEFT)
-    dict_hotkey = str(daemon.config.get("dictation_hotkey", "ctrl+alt+d"))
-    tk.Label(
-        dict_hotkey_row,
-        text="+".join(part.strip().capitalize() for part in dict_hotkey.split("+")),
-        bg=FIELD_COLOR, fg=TEXT_COLOR, font=("Segoe UI Semibold", 8),
-        padx=S(8), pady=S(2), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR,
-    ).pack(side=tk.RIGHT)
-    hotkey_row = tk.Frame(footer, bg=CARD_COLOR)
-    hotkey_row.pack(fill=tk.X, pady=(0, S(10)))
-    ttk.Label(hotkey_row, text="Stop playback", style="CardSub.TLabel").pack(side=tk.LEFT)
-    hotkey = str(daemon.config.get("stop_hotkey", "ctrl+alt+s"))
-    tk.Label(
-        hotkey_row,
-        text="+".join(part.strip().capitalize() for part in hotkey.split("+")),
-        bg=FIELD_COLOR, fg=TEXT_COLOR, font=("Segoe UI Semibold", 8),
-        padx=S(8), pady=S(2), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR,
-    ).pack(side=tk.RIGHT)
+    tk.Frame(footer, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(0, S(10)))
+    ttk.Label(footer, text="SHORTCUTS (CLICK TO CHANGE)", style="Caption.TLabel").pack(anchor=tk.W, pady=(0, S(6)))
+
+    def _fmt_hk(hk_str: str) -> str:
+        return "+".join(part.strip().capitalize() for part in hk_str.split("+") if part.strip())
+
+    recording_target: list[tuple[str, tk.Label, str] | None] = [None]
+    hotkey_badges: dict[str, tk.Label] = {}
+
+    def _cancel_hotkey_record() -> None:
+        cur = recording_target[0]
+        if cur is None:
+            return
+        cfg_key, badge_lbl, default_hk = cur
+        recording_target[0] = None
+        saved_hk = str(daemon.config.get(cfg_key, default_hk))
+        badge_lbl.config(text=_fmt_hk(saved_hk), fg=TEXT_COLOR, highlightbackground=BORDER_COLOR)
+
+    def _start_hotkey_record(cfg_key: str, badge_lbl: tk.Label, default_hk: str) -> None:
+        _cancel_hotkey_record()
+        recording_target[0] = (cfg_key, badge_lbl, default_hk)
+        badge_lbl.config(text="Press keys...", fg=ACCENT_COLOR, highlightbackground=ACCENT_COLOR)
+        root.focus_force()
+
+    def _on_hotkey_capture(event: tk.Event) -> str | None:
+        cur = recording_target[0]
+        if cur is None:
+            return None
+        cfg_key, badge_lbl, default_hk = cur
+        ks = (getattr(event, "keysym", "") or "").lower()
+        kc = getattr(event, "keycode", 0) or 0
+
+        if ks in (
+            "control_l", "control_r", "alt_l", "alt_r",
+            "shift_l", "shift_r", "win_l", "win_r", "super_l", "super_r",
+        ):
+            return "break"
+
+        if ks == "escape":
+            _cancel_hotkey_record()
+            return "break"
+
+        u32 = ctypes.windll.user32
+        mods: list[str] = []
+        if u32.GetAsyncKeyState(0x11) & 0x8000:
+            mods.append("ctrl")
+        if u32.GetAsyncKeyState(0x12) & 0x8000:
+            mods.append("alt")
+        if u32.GetAsyncKeyState(0x10) & 0x8000:
+            mods.append("shift")
+        if (u32.GetAsyncKeyState(0x5B) & 0x8000) or (u32.GetAsyncKeyState(0x5C) & 0x8000):
+            mods.append("win")
+
+        key_map = {
+            "space": "space", "return": "enter", "tab": "tab",
+            "back": "backspace", "backspace": "backspace",
+            "insert": "insert", "delete": "delete",
+            "prior": "pageup", "next": "pagedown",
+            "home": "home", "end": "end",
+            "up": "up", "down": "down", "left": "left", "right": "right",
+            "grave": "`", "minus": "-", "equal": "=",
+        }
+        key_tok = ""
+        if 0x70 <= kc <= 0x87:
+            key_tok = f"f{kc - 0x70 + 1}"
+        elif 0x30 <= kc <= 0x5A:
+            key_tok = chr(kc).lower()
+        elif ks in key_map:
+            key_tok = key_map[ks]
+        elif len(ks) == 1 and ks.isalnum():
+            key_tok = ks
+
+        if not key_tok:
+            return "break"
+        if not mods and not key_tok.startswith("f"):
+            tools_status_lbl.config(
+                text="Include Ctrl, Alt, or Shift (or use F1-F12)",
+                foreground=DANGER_COLOR,
+            )
+            return "break"
+
+        combo_str = "+".join(mods + [key_tok])
+        recording_target[0] = None
+        if hasattr(daemon, "set_hotkey") and daemon.set_hotkey(cfg_key, combo_str):
+            badge_lbl.config(text=_fmt_hk(combo_str), fg=TEXT_COLOR, highlightbackground=BORDER_COLOR)
+            tools_status_lbl.config(
+                text=f"Shortcut set to {_fmt_hk(combo_str)}",
+                foreground=SUCCESS_COLOR,
+            )
+        else:
+            _cancel_hotkey_record()
+            tools_status_lbl.config(text="Invalid shortcut combination", foreground=DANGER_COLOR)
+        return "break"
+
+    root.bind("<KeyPress>", _on_hotkey_capture, add="+")
+
+    def _make_hotkey_row(label_text: str, cfg_key: str, default_hk: str, pad_bottom: int) -> None:
+        row = tk.Frame(footer, bg=CARD_COLOR)
+        row.pack(fill=tk.X, pady=(0, pad_bottom))
+        ttk.Label(row, text=label_text, style="CardSub.TLabel").pack(side=tk.LEFT)
+        cur_hk = str(daemon.config.get(cfg_key, default_hk))
+        badge = tk.Label(
+            row,
+            text=_fmt_hk(cur_hk),
+            bg=FIELD_COLOR, fg=TEXT_COLOR, font=("Segoe UI Semibold", 8),
+            padx=S(8), pady=S(2), bd=0, highlightthickness=1,
+            highlightbackground=BORDER_COLOR, cursor="hand2",
+        )
+        badge.pack(side=tk.RIGHT)
+        badge.bind("<Button-1>", lambda e, k=cfg_key, b=badge, d=default_hk: _start_hotkey_record(k, b, d))
+        hotkey_badges[cfg_key] = badge
+
+    _make_hotkey_row("Dictate (Bark 3.0)", "dictation_hotkey", "ctrl+alt+d", S(5))
+    _make_hotkey_row("Paste last dictation", "paste_last_hotkey", "ctrl+alt+v", S(5))
+    _make_hotkey_row("Stop playback", "stop_hotkey", "ctrl+alt+s", S(8))
     ttk.Label(footer, text=f"Version {__version__}", style="CardSub.TLabel").pack(anchor=tk.W)
 
     # -----------------------------------------------------------------------

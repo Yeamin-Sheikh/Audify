@@ -412,10 +412,17 @@ KEYEVENTF_KEYUP = 0x0002
 VK_CONTROL = 0x11
 VK_MENU = 0x12
 VK_SHIFT = 0x10
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
 VK_V = 0x56
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+_user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_user32.GetAsyncKeyState.restype = wintypes.SHORT
 
 _user32.OpenClipboard.argtypes = [wintypes.HWND]
 _user32.OpenClipboard.restype = wintypes.BOOL
@@ -471,9 +478,17 @@ def set_clipboard_text(text: str) -> bool:
 
 def send_ctrl_v() -> None:
     """Simulate Ctrl+V keystrokes to paste clipboard text into the focused window."""
-    # Ensure Alt/Shift modifiers from the dictation hotkey are released first
-    _user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-    _user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+    # Wait briefly (up to 350ms) if Alt or Shift is still physically held from a shortcut
+    t_wait = time.monotonic()
+    while (time.monotonic() - t_wait) < 0.35:
+        alt_down = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+        shift_down = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+        if not alt_down and not shift_down:
+            break
+        time.sleep(0.015)
+
+    for vk_mod in (VK_MENU, VK_LMENU, VK_RMENU, VK_SHIFT, VK_LSHIFT, VK_RSHIFT):
+        _user32.keybd_event(vk_mod, 0, KEYEVENTF_KEYUP, 0)
     time.sleep(0.02)
     _user32.keybd_event(VK_CONTROL, 0, 0, 0)
     _user32.keybd_event(VK_V, 0, 0, 0)
@@ -734,9 +749,11 @@ class BarkCleanController:
     def __init__(self, daemon: TTSDaemon | None = None) -> None:
         self.daemon = daemon
         self.recorder = Win32MicRecorder()
+        self.last_dictated: str = ""
         self._lock = threading.Lock()
         self._transcribing = False
         self._last_toggle_time = 0.0
+        self._last_paste_time = 0.0
         self._on_complete_cb: Callable[[bool, str], None] | None = None
 
         # Sidecar subprocess state
@@ -927,6 +944,7 @@ class BarkCleanController:
 
     def _copy_and_paste(self, text: str) -> None:
         """Copy *text* to clipboard without triggering TTS and paste via Ctrl+V."""
+        self.last_dictated = text
         if self.daemon is not None:
             # Mark clipboard listener's last text and clear last_ctrl_c_time so
             # Audify's TTS reader never reads your own dictated text aloud
@@ -940,8 +958,28 @@ class BarkCleanController:
         if set_clipboard_text(text):
             send_ctrl_v()
             if self.daemon is not None:
+                self.daemon._notify_state_change()
                 preview = text if len(text) <= 70 else text[:67] + "..."
                 print(f"[STT] Dictated ({len(text)} chars): {preview}")
+
+    def paste_last_dictation(self) -> bool:
+        """Re-paste the most recently dictated text into the focused input field."""
+        now = time.monotonic()
+        if (now - self._last_paste_time) < 0.25:
+            return False
+        self._last_paste_time = now
+
+        text = self.last_dictated
+        if not text:
+            return False
+
+        threading.Thread(
+            target=self._copy_and_paste,
+            args=(text,),
+            daemon=True,
+            name="bark-paste-last",
+        ).start()
+        return True
 
     def _ensure_worker_started(self) -> bool:
         """Spawn the Bark 3.0 Clean sidecar subprocess if not already running."""

@@ -85,6 +85,14 @@ class TTSDaemon:
         )
         self._dictation_combo_was_down: bool = False
 
+        # Parse paste-last-dictation hotkey (default ctrl+alt+v) into Win32 modifiers + VK code
+        paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "ctrl+alt+v"))
+        self._paste_last_hotkey_parsed = parse_win32_hotkey(paste_last_hotkey_str) or (
+            MOD_CONTROL | MOD_ALT,
+            ord("V"),
+        )
+        self._paste_last_combo_was_down: bool = False
+
         # Speech-to-Text controller powered by Underdog Bark 3.0 Clean
         self.stt = BarkCleanController(daemon=self)
 
@@ -95,13 +103,15 @@ class TTSDaemon:
         # Pre-warm Sec-MS-GEC v2 token, shared TCPConnector, and DNS cache
         prewarm_edge_tts(self._loop)
 
-        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop & dictation hotkeys
+        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop, dictation & paste-last
         self._clip_listener = ClipboardListener(
             self._on_clipboard_change,
             stop_hotkey=stop_hotkey_str,
             on_stop_hotkey=self.stop_audio,
             dictation_hotkey=dictation_hotkey_str,
             on_dictation_hotkey=self.toggle_dictation,
+            paste_last_hotkey=paste_last_hotkey_str,
+            on_paste_last_hotkey=self.paste_last_dictation,
         )
 
         # Tray icon (injected later)
@@ -244,9 +254,54 @@ class TTSDaemon:
             return False
         return True
 
+    def _is_paste_last_combo_down(self) -> bool:
+        """Return True if the configured paste-last hotkey (e.g. Ctrl+Alt+V) is physically held down."""
+        mods, vk = self._paste_last_hotkey_parsed
+        if not is_vk_down(vk):
+            return False
+        if (mods & MOD_CONTROL) and not is_vk_down(VK_CONTROL):
+            return False
+        if (mods & MOD_ALT) and not is_vk_down(VK_MENU):
+            return False
+        if (mods & MOD_SHIFT) and not is_vk_down(VK_SHIFT):
+            return False
+        return True
+
     def toggle_dictation(self) -> None:
         """Toggle Bark 3.0 Clean microphone dictation on/off."""
         self.stt.toggle_dictation()
+
+    def paste_last_dictation(self) -> None:
+        """Re-paste the most recently dictated speech into the active input field."""
+        self.stt.paste_last_dictation()
+
+    def set_hotkey(self, key_name: str, hotkey_str: str) -> bool:
+        """Update a global shortcut key ('dictation_hotkey', 'paste_last_hotkey', or 'stop_hotkey')."""
+        norm = hotkey_str.strip().lower()
+        parsed = parse_win32_hotkey(norm)
+        if not parsed:
+            return False
+
+        with self._config_lock:
+            self.config[key_name] = norm
+            save_config(self.config)
+
+        if key_name == "stop_hotkey":
+            self._stop_hotkey_parsed = parsed
+            self._clip_listener.rebind_hotkeys(stop_hotkey=norm)
+        elif key_name == "dictation_hotkey":
+            self._dictation_hotkey_parsed = parsed
+            self._dictation_combo_was_down = False
+            self._clip_listener.rebind_hotkeys(dictation_hotkey=norm)
+        elif key_name == "paste_last_hotkey":
+            self._paste_last_hotkey_parsed = parsed
+            self._paste_last_combo_was_down = False
+            self._clip_listener.rebind_hotkeys(paste_last_hotkey=norm)
+        else:
+            return False
+
+        self._notify_state_change()
+        return True
 
     def _poll_input_state_loop(self) -> None:
         """Poll Win32 GetAsyncKeyState every 15ms so copy/stop/dictation keys work even in Admin windows."""
@@ -267,6 +322,13 @@ class TTSDaemon:
                     self.toggle_dictation()
                 elif not dict_down:
                     self._dictation_combo_was_down = False
+
+                paste_down = self._is_paste_last_combo_down()
+                if paste_down and not self._paste_last_combo_was_down:
+                    self._paste_last_combo_was_down = True
+                    self.paste_last_dictation()
+                elif not paste_down:
+                    self._paste_last_combo_was_down = False
             except Exception:
                 pass
             time.sleep(0.015)
@@ -286,6 +348,9 @@ class TTSDaemon:
         elif self._is_dictation_combo_down() and not self._dictation_combo_was_down:
             self._dictation_combo_was_down = True
             self.toggle_dictation()
+        elif self._is_paste_last_combo_down() and not self._paste_last_combo_was_down:
+            self._paste_last_combo_was_down = True
+            self.paste_last_dictation()
 
     def on_mouse_click(
         self, x: int, y: int, button: pynput_mouse.Button, pressed: bool

@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.6.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.7.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -116,6 +116,8 @@ Download **`Audify.exe`** and run it from anywhere.
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
 | Dictate speech to text (Bark 3.0 Clean) | Press `Ctrl+Alt+D` once and speak; automatically stops, transcribes, and pastes when you pause |
+| Re-paste last dictation | `Ctrl+Alt+V` (or Tray -> **Paste Last Dictation**) if your cursor missed the input box |
+| Change global shortcuts | Open **Control Center...** and click any shortcut badge (`Dictate`, `Paste last dictation`, `Stop playback`) |
 | Change voice | Tray -> **Voice** |
 | Change speed | Tray -> **Speed** |
 | Change volume | Tray -> **Volume** |
@@ -196,6 +198,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.7
+
+- **Customizable global shortcuts & Paste Last Dictation (`Ctrl+Alt+V`)**: added `paste_last_hotkey` (`Ctrl+Alt+V`) and **Paste Last Dictation** in the system tray menu so if you dictate while your cursor is not inside an input box, you can click the input field and press `Ctrl+Alt+V` to immediately paste your last dictated speech without re-speaking. Also made all global shortcut badges in the **Control Center** sidebar (`Dictate (Bark 3.0)`, `Paste last dictation`, and `Stop playback`) interactive click-to-record buttons that save to `config.json` and live-rebind Win32 `RegisterHotKey` (`WM_APP_REBIND_HOTKEYS`) without restarting Audify.
 
 ### v2.9.6
 
