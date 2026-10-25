@@ -26,6 +26,11 @@ from audify.config import (
 )
 from audify.engine import TTSDaemon
 from audify.gui.control_center import show_dictionary_ui
+from audify.gui.theme import (
+    THEME_MODES,
+    apply_native_menu_theme,
+    resolve_theme,
+)
 
 
 # -- Dark mode for native Win32 menus -----------------------------------------
@@ -142,17 +147,28 @@ _disc_base_cache: dict[str, Image.Image] = {}
 
 
 def create_recording_visualizer_icon(
-    levels: list[float], phase: float, transcribing: bool = False
+    levels: list[float],
+    phase: float,
+    transcribing: bool = False,
+    light_mode: bool = False,
 ) -> Image.Image:
     """Render an animated 5-bar audio visualizer inside the tray icon while dictating."""
     n = _ICON_SIZE * 2  # 128px supersampled to 64px for fast 10 FPS rendering
-    palette_key = "transcribing" if transcribing else "recording"
+    mode_tag = "light" if light_mode else "dark"
+    palette_key = f"{mode_tag}_{'transcribing' if transcribing else 'recording'}"
     if palette_key not in _disc_base_cache:
-        top, bottom = (
-            ((63, 63, 70), (24, 24, 27))
-            if transcribing
-            else _DISC_COLORS["recording"]
-        )
+        if light_mode:
+            top, bottom = (
+                ((232, 232, 238), (210, 210, 218))
+                if transcribing
+                else ((248, 248, 250), (226, 226, 232))
+            )
+        else:
+            top, bottom = (
+                ((63, 63, 70), (24, 24, 27))
+                if transcribing
+                else _DISC_COLORS["recording"]
+            )
         gradient = Image.new("RGBA", (1, n))
         for y in range(n):
             t = y / (n - 1)
@@ -170,7 +186,7 @@ def create_recording_visualizer_icon(
 
     image = _disc_base_cache[palette_key].copy()
     d = ImageDraw.Draw(image)
-    white = (255, 255, 255, 255)
+    bar_fg = (18, 18, 20, 255) if light_mode else (255, 255, 255, 255)
 
     num_bars = 5
     bar_w = n * 0.095
@@ -196,7 +212,7 @@ def create_recording_visualizer_icon(
         d.rounded_rectangle(
             (bx, cy - hh, bx + bar_w, cy + hh),
             radius=bar_w / 2.0,
-            fill=white,
+            fill=bar_fg,
         )
 
     return image.resize((_ICON_SIZE, _ICON_SIZE), Image.Resampling.BILINEAR)
@@ -258,6 +274,14 @@ def _silence_delay_display_name(daemon: TTSDaemon) -> str:
     return f"{val:.1f}s"
 
 
+def _theme_display_name(daemon: TTSDaemon) -> str:
+    mode = str(daemon.config.get("theme_mode", "system"))
+    for label, m_val in THEME_MODES.items():
+        if m_val == mode:
+            return label
+    return "System"
+
+
 # -- Main setup ---------------------------------------------------------------
 
 def setup_tray() -> None:
@@ -267,6 +291,7 @@ def setup_tray() -> None:
     _enable_dark_mode()
 
     daemon = TTSDaemon()
+    apply_native_menu_theme(str(daemon.config.get("theme_mode", "system")))
 
     # Launch worker loop and clipboard monitor
     threading.Thread(target=daemon.worker_loop, daemon=True).start()
@@ -371,6 +396,9 @@ def setup_tray() -> None:
     def make_silence_delay_setter(delay_s: float):
         return lambda icon, item_action: daemon.set_stt_silence_delay(delay_s)
 
+    def make_theme_setter(mode_str: str):
+        return lambda icon, item_action: daemon.set_theme_mode(mode_str)
+
     def voice_group_items(voices: list[tuple[str, str]]) -> list:
         """Voices under disabled "Female" / "Male" headers."""
         items: list = []
@@ -422,6 +450,16 @@ def setup_tray() -> None:
             radio=True,
         )
         for label, d_val in STT_SILENCE_DELAYS.items()
+    ]
+
+    theme_menu_items = [
+        item(
+            label,
+            make_theme_setter(m_val),
+            checked=lambda i, mv=m_val: str(daemon.config.get("theme_mode", "system")) == mv,
+            radio=True,
+        )
+        for label, m_val in THEME_MODES.items()
     ]
 
     # -- Build the tray icon and menu -----------------------------------------
@@ -492,6 +530,10 @@ def setup_tray() -> None:
                 on_toggle_skip_code,
                 checked=lambda i: daemon.config.get("skip_code_blocks", True),
             ),
+            item(
+                lambda text: f"Appearance\t{_theme_display_name(daemon)}",
+                Menu(*theme_menu_items),
+            ),
             Menu.SEPARATOR,
             item(
                 lambda text: "Restarting Bluetooth..." if is_bluetooth_restarting() else "Restart Bluetooth",
@@ -503,7 +545,7 @@ def setup_tray() -> None:
                 on_reset_icon_cache,
                 enabled=lambda i: not is_icon_cache_resetting(),
             ),
-            item("Control Center...", on_open_settings),
+            item("Settings...", on_open_settings),
             item("Quit Audify", on_exit),
         ),
     )
@@ -519,8 +561,15 @@ def setup_tray() -> None:
                 if rec or trans:
                     was_animating = True
                     levels = list(getattr(daemon.stt.recorder, "level_bars", ()))
+                    is_light = (
+                        resolve_theme(str(daemon.config.get("theme_mode", "system")))
+                        == "light"
+                    )
                     tray.icon = create_recording_visualizer_icon(
-                        levels, time.perf_counter(), transcribing=trans
+                        levels,
+                        time.perf_counter(),
+                        transcribing=trans,
+                        light_mode=is_light,
                     )
                     time.sleep(0.09)
                 else:

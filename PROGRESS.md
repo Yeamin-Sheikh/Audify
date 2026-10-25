@@ -13,6 +13,28 @@
 
 ## Progress log
 
+### 2026-10-26, v2.9.12 WinUI 3 Settings redesign, System/Light/Dark themes, borderless HUD pill, and self-bootstrapping Bark runtime
+
+**Duration:** ~8m
+**Status:** Done
+
+#### What changed
+- Renamed "Control Center" to "Settings" across the GUI (`audify/gui/control_center.py`) and system tray (`audify/tray.py`).
+- Created `audify/gui/theme.py` with Windows 11 WinUI 3 Dark and Light palettes, automatic Windows `AppsUseLightTheme` detection (`theme_mode = "system"` default), DWM title-bar caption/text color synchronization, and `uxtheme.dll` native menu theming.
+- Added live `System | Light | Dark` Appearance switching in both the Settings sidebar and the system tray menu.
+- Removed the border outline from `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) and made both the floating pill and the tray visualizer invert automatically between Dark mode (black capsule, white bars) and Light mode (white capsule, black bars).
+- Added `bootstrap_bark_python()` in `audify/stt.py` to automatically set up a self-contained portable Python 3.12 + CPU PyTorch + `transformers` environment in `%LOCALAPPDATA%\Audify\bark_clean\runtime` on machines without Python installed.
+- Bumped version to `2.9.12`.
+
+#### Files touched
+- `audify/gui/theme.py`, created WinUI 3 Dark/Light theme module.
+- `audify/gui/control_center.py`, `audify/gui/widgets.py`, redesigned Settings UI with live WinUI 3 Light/Dark/System switching.
+- `audify/gui/stt_hud.py`, `audify/tray.py`, removed HUD border outline and added Light/Dark theme inversion.
+- `audify/stt.py`, added `bootstrap_bark_python()` for zero-prerequisite first-run STT setup.
+- `audify/config.py`, `audify/engine.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.12`.
+
+---
+
 ### 2026-10-25, v2.9.11 Monochrome black-and-white dictation visualizer
 
 **Duration:** ~3m

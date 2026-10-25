@@ -30,7 +30,9 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import wave
+import zipfile
 import difflib
 import re
 from typing import TYPE_CHECKING, Any, Callable
@@ -1149,9 +1151,22 @@ if __name__ == "__main__":
 '''
 
 
+PYTHON_EMBED_URL = (
+    "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip"
+)
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+_bootstrap_lock = threading.Lock()
+
+
+def get_bark_runtime_python() -> str:
+    """Return path to Audify's self-contained Python runtime in `%LOCALAPPDATA%\\Audify\\bark_clean\\runtime`."""
+    return os.path.join(get_bark_dir(), "runtime", "python.exe")
+
+
 def find_bark_python() -> str | None:
     """Locate a Python interpreter on the machine with ParakeetForTDT support."""
     candidates: list[str] = [
+        get_bark_runtime_python(),
         r"C:\Python314\python.exe",
         shutil.which("python") or "",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python314\python.exe"),
@@ -1199,6 +1214,109 @@ def find_bark_python() -> str | None:
     return None
 
 
+def bootstrap_bark_python(
+    status_cb: Callable[[str], None] | None = None,
+) -> str | None:
+    """Automatically download and configure a self-contained Python + Bark 3.0 Clean runtime.
+
+    Runs only on machines that do not already have Python with PyTorch and
+    ``transformers`` (``ParakeetForTDT``) installed, keeping ``Audify.exe`` lightweight
+    while making Speech-to-Text work out of the box on a clean Windows PC.
+    """
+    with _bootstrap_lock:
+        existing = find_bark_python()
+        if existing:
+            return existing
+
+        rt_dir = os.path.join(get_bark_dir(), "runtime")
+        os.makedirs(rt_dir, exist_ok=True)
+        py_exe = os.path.join(rt_dir, "python.exe")
+
+        try:
+            if not os.path.isfile(py_exe):
+                if status_cb:
+                    status_cb("Downloading portable Python runtime (11 MB)...")
+                zip_path = os.path.join(rt_dir, "python_embed.zip")
+                urllib.request.urlretrieve(PYTHON_EMBED_URL, zip_path)
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(rt_dir)
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+
+                # Enable site-packages in python312._pth
+                pth_file = os.path.join(rt_dir, "python312._pth")
+                if os.path.isfile(pth_file):
+                    with open(pth_file, "r", encoding="utf-8") as f:
+                        pth_txt = f.read()
+                    pth_txt = pth_txt.replace("#import site", "import site")
+                    if "Lib\\site-packages" not in pth_txt:
+                        pth_txt = pth_txt.rstrip() + "\nLib\\site-packages\n"
+                    with open(pth_file, "w", encoding="utf-8") as f:
+                        f.write(pth_txt)
+
+            pip_exe = os.path.join(rt_dir, "Scripts", "pip.exe")
+            if not os.path.isfile(pip_exe):
+                if status_cb:
+                    status_cb("Configuring Python package manager...")
+                get_pip_py = os.path.join(rt_dir, "get-pip.py")
+                urllib.request.urlretrieve(GET_PIP_URL, get_pip_py)
+                subprocess.run(
+                    [py_exe, get_pip_py, "--no-warn-script-location"],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+
+            if status_cb:
+                status_cb("Installing Bark 3.0 CPU engine (first-time setup)...")
+            subprocess.run(
+                [
+                    py_exe,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-warn-script-location",
+                    "torch",
+                    "--index-url",
+                    "https://download.pytorch.org/whl/cpu",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if status_cb:
+                status_cb("Installing Bark 3.0 audio & transformer libraries...")
+            subprocess.run(
+                [
+                    py_exe,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-warn-script-location",
+                    "transformers>=5.5.0",
+                    "constriction",
+                    "soundfile",
+                    "soxr",
+                    "numpy",
+                    "huggingface_hub",
+                    "safetensors",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            print(f"[WARN] Bark 3.0 Clean runtime bootstrap failed: {e}")
+            return None
+
+        return find_bark_python()
+
+
 class BarkCleanController:
     """Manages microphone recording, Bark 3.0 Clean sidecar lifecycle, and auto-paste."""
 
@@ -1225,9 +1343,11 @@ class BarkCleanController:
         self._idle_timer: threading.Timer | None = None
 
         # Silently pre-warm the Bark 3.0 Clean worker 3s after daemon startup
-        # so the very first dictation transcribes in ~2s as soon as speech ends.
+        # if the runtime is already installed, so first dictation transcribes in ~2s.
         if self.daemon is not None:
-            prewarm = threading.Timer(3.0, self._ensure_worker_started)
+            prewarm = threading.Timer(
+                3.0, lambda: self._ensure_worker_started(allow_bootstrap=False)
+            )
             prewarm.daemon = True
             prewarm.start()
 
@@ -1478,14 +1598,20 @@ class BarkCleanController:
         ).start()
         return True
 
-    def _ensure_worker_started(self) -> bool:
+    def _ensure_worker_started(self, allow_bootstrap: bool = True) -> bool:
         """Spawn the Bark 3.0 Clean sidecar subprocess if not already running."""
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
                 py_exe = find_bark_python()
+                if not py_exe and allow_bootstrap:
+                    def _on_boot_status(msg: str) -> None:
+                        if self.daemon is not None:
+                            self.daemon._set_status(msg, speaking=False)
+
+                    py_exe = bootstrap_bark_python(status_cb=_on_boot_status)
                 if not py_exe:
                     self._proc_error = (
-                        "Python with transformers >= 5.16 (ParakeetForTDT) not found."
+                        "Could not initialize Bark 3.0 Clean Python runtime."
                     )
                     return False
 

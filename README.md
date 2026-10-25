@@ -191,14 +191,23 @@ audify/
 ├── pronunciation_library.py Built-in developer pronunciation library
 ├── tray.py                  Tray icon and menu
 └── gui/
-    ├── control_center.py    Settings and pronunciation dictionary window
-    └── widgets.py           Fluent-style slider, toggle, entry and buttons
+    ├── control_center.py    WinUI 3 Settings and pronunciation/STT dictionary window
+    ├── stt_hud.py           Borderless monochrome floating dictation visualizer HUD
+    ├── theme.py             WinUI 3 Dark/Light/System tokens & DWM title-bar integration
+    └── widgets.py           WinUI 3 slider, toggle, entry and buttons
 clean_text.py                Markdown to speech text, pronunciation matching
 ```
 
 </details>
 
 ## Changelog
+
+### v2.9.12
+
+- **Renamed Control Center to Settings & Redesigned with WinUI 3 Styling**: updated the window title (`Audify Settings`), sidebar header (`Settings`), and tray menu (`Settings...`) to use authentic Windows 11 WinUI 3 surface, control, and typography tokens (`audify/gui/theme.py`, `audify/gui/control_center.py`, `audify/gui/widgets.py`).
+- **System / Light / Dark Theme Switcher**: defaults to **System** (automatically matching your Windows 11 Light or Dark device setting via `AppsUseLightTheme`) with a live `System | Light | Dark` Appearance toggle in both the Settings window and the system tray menu that re-themes the entire UI, DWM title bar, and native menus on the fly.
+- **Borderless Theme-Adaptive Dictation Pill**: removed the border outline around `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) and made both the floating pill and tray visualizer invert automatically in Light mode (white capsule with black equalizer bars in Light mode; black capsule with white equalizer bars in Dark mode).
+- **Self-Bootstrapping Bark 3.0 Clean Runtime**: added `bootstrap_bark_python` in `audify/stt.py` so if a user installs Audify on a clean Windows PC without Python or PyTorch, Audify automatically downloads the 11 MB Windows embeddable Python runtime and installs CPU `torch`, `transformers`, `constriction`, `soundfile`, and `soxr` into `%LOCALAPPDATA%\Audify\bark_clean\runtime` on first dictation.
 
 ### v2.9.11
 

@@ -1,11 +1,14 @@
 """
 Floating non-activating audio visualizer HUD pill for Bark 3.0 Clean dictation.
 
-Renders a sleek, click-through Windows 11 dark pill near the bottom of the screen
-whenever microphone dictation is active:
+Renders a borderless, click-through Windows 11 monochrome pill near the bottom
+of the screen whenever microphone dictation is active:
   - Uses Win32 ``WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST``
     so it NEVER steals keyboard focus from the active input field and mouse clicks
     pass straight through it.
+  - Automatically adapts to the active WinUI 3 theme (Device System, Dark, or Light):
+    dark mode renders white equalizer bars inside a borderless black capsule;
+    light mode inverts to black equalizer bars inside a borderless white capsule.
   - Animates 9 real-time audio-reactive visualizer bars at 25 FPS driven by the
     microphone's live RMS amplitude while recording, and a smooth wave animation
     while Bark 3.0 Clean is transcribing.
@@ -19,6 +22,8 @@ import threading
 import time
 import tkinter as tk
 from typing import TYPE_CHECKING
+
+from audify.gui.theme import get_palette
 
 if TYPE_CHECKING:
     from audify.stt import BarkCleanController
@@ -36,16 +41,6 @@ SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
-
-_TRANSPARENT_KEY = "#010101"
-_PILL_BG = "#0d0d0f"
-_BORDER_LISTEN = "#52525b"
-_BORDER_TRANSCRIBE = "#a1a1aa"
-_BAR_LISTEN = "#d4d4d8"
-_BAR_SPEAKING = "#ffffff"
-_BAR_TRANSCRIBE = "#e4e4e7"
-_TEXT_FG = "#fafafa"
-_SUB_FG = "#a1a1aa"
 
 
 def _rounded_rect_points(
@@ -109,6 +104,17 @@ class DictationVisualizerHUD:
         """Request the visualizer HUD to hide."""
         self._visible_requested = False
 
+    def _current_palette(self) -> dict[str, str]:
+        """Resolve the active WinUI 3 palette from daemon config ('system', 'light', or 'dark')."""
+        daemon = getattr(self.stt, "daemon", None)
+        mode = "system"
+        if daemon is not None:
+            try:
+                mode = str(daemon.config.get("theme_mode", "system"))
+            except Exception:
+                mode = "system"
+        return get_palette(mode)
+
     def _apply_noactivate_clickthrough(self, root: tk.Tk) -> int:
         """Apply Win32 extended styles so the HUD never takes focus or blocks clicks."""
         u32 = ctypes.windll.user32
@@ -140,13 +146,17 @@ class DictationVisualizerHUD:
                 self._started = False
             return
 
+        pal = self._current_palette()
+        cur_mode = [pal["mode"]]
+        key_color = pal["pill_key"]
+
         root.withdraw()
         root.overrideredirect(True)
-        root.configure(bg=_TRANSPARENT_KEY)
+        root.configure(bg=key_color)
         try:
-            root.wm_attributes("-transparentcolor", _TRANSPARENT_KEY)
+            root.wm_attributes("-transparentcolor", key_color)
             root.wm_attributes("-topmost", True)
-            root.wm_attributes("-alpha", 0.95)
+            root.wm_attributes("-alpha", 0.96)
         except Exception:
             pass
 
@@ -178,7 +188,7 @@ class DictationVisualizerHUD:
             root,
             width=w,
             height=h,
-            bg=_TRANSPARENT_KEY,
+            bg=key_color,
             highlightthickness=0,
             bd=0,
         )
@@ -187,6 +197,7 @@ class DictationVisualizerHUD:
         pill_r = (h - S(4)) // 2
         dot_cy = h // 2
 
+        # Borderless capsule (outline="" and width=0 so there is never an outline halo)
         pill_id = _draw_rounded_rect(
             canvas,
             S(2),
@@ -194,9 +205,9 @@ class DictationVisualizerHUD:
             w - S(2),
             h - S(2),
             pill_r,
-            fill=_PILL_BG,
-            outline=_BORDER_LISTEN,
-            width=max(1, S(1.5)),
+            fill=pal["pill_bg"],
+            outline="",
+            width=0,
         )
 
         dcx = S(2) + pad_x + dot_r
@@ -205,7 +216,7 @@ class DictationVisualizerHUD:
             dot_cy - dot_r,
             dcx + dot_r,
             dot_cy + dot_r,
-            fill=_BAR_LISTEN,
+            fill=pal["pill_bar_idle"],
             outline="",
         )
 
@@ -218,7 +229,7 @@ class DictationVisualizerHUD:
                 dot_cy - S(3),
                 bx + bar_w,
                 dot_cy + S(3),
-                fill=_BAR_LISTEN,
+                fill=pal["pill_bar_idle"],
                 outline="",
             )
             bar_ids.append(bid)
@@ -237,6 +248,18 @@ class DictationVisualizerHUD:
                     is_shown[0] = False
                 root.after(80, _tick)
                 return
+
+            pal_now = self._current_palette()
+            if pal_now["mode"] != cur_mode[0]:
+                cur_mode[0] = pal_now["mode"]
+                new_key = pal_now["pill_key"]
+                root.configure(bg=new_key)
+                canvas.configure(bg=new_key)
+                try:
+                    root.wm_attributes("-transparentcolor", new_key)
+                except Exception:
+                    pass
+            canvas.itemconfig(pill_id, fill=pal_now["pill_bg"], outline="")
 
             if not is_shown[0]:
                 is_shown[0] = True
@@ -259,19 +282,21 @@ class DictationVisualizerHUD:
             min_half_h = S(2.5)
 
             if trans:
-                canvas.itemconfig(pill_id, outline=_BORDER_TRANSCRIBE)
-                canvas.itemconfig(dot_id, fill=_BAR_TRANSCRIBE)
+                canvas.itemconfig(dot_id, fill=pal_now["pill_bar_transcribe"])
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)
                     wave_v = 0.5 + 0.5 * math.sin(t * 7.5 - i * 0.55)
                     hh = min_half_h + wave_v * (max_half_h * 0.78 - min_half_h)
                     canvas.coords(bid, bx, dot_cy - hh, bx + bar_w, dot_cy + hh)
-                    canvas.itemconfig(bid, fill=_BAR_TRANSCRIBE)
+                    canvas.itemconfig(bid, fill=pal_now["pill_bar_transcribe"])
             else:
                 levels = list(getattr(self.stt.recorder, "level_bars", ()))
                 pulse = 0.5 + 0.5 * math.sin(t * 5.0)
-                dot_col = "#ffffff" if pulse > 0.45 else "#71717a"
-                canvas.itemconfig(pill_id, outline=_BORDER_LISTEN)
+                dot_col = (
+                    pal_now["pill_dot_hi"]
+                    if pulse > 0.45
+                    else pal_now["pill_dot_lo"]
+                )
                 canvas.itemconfig(dot_id, fill=dot_col)
 
                 for i, bid in enumerate(bar_ids):
@@ -284,7 +309,12 @@ class DictationVisualizerHUD:
                     hh = min_half_h + eff * (max_half_h - min_half_h)
                     canvas.coords(bid, bx, dot_cy - hh, bx + bar_w, dot_cy + hh)
                     canvas.itemconfig(
-                        bid, fill=_BAR_SPEAKING if eff > 0.28 else _BAR_LISTEN
+                        bid,
+                        fill=(
+                            pal_now["pill_bar_active"]
+                            if eff > 0.28
+                            else pal_now["pill_bar_idle"]
+                        ),
                     )
 
             root.after(40, _tick)

@@ -311,6 +311,21 @@ class TTSDaemon:
             save_config(self.config)
         self._notify_state_change()
 
+    def set_theme_mode(self, mode: str) -> None:
+        """Update the UI theme preference ('system', 'light', or 'dark') and persist config."""
+        norm = (mode or "system").strip().lower()
+        if norm not in ("system", "light", "dark"):
+            norm = "system"
+        with self._config_lock:
+            self.config["theme_mode"] = norm
+            save_config(self.config)
+        try:
+            from audify.gui.theme import apply_native_menu_theme
+            apply_native_menu_theme(norm)
+        except Exception:
+            pass
+        self._notify_state_change()
+
     def set_hotkey(self, key_name: str, hotkey_str: str) -> bool:
         """Update a global shortcut key ('dictation_hotkey', 'paste_last_hotkey', or 'stop_hotkey')."""
         norm = hotkey_str.strip().lower()

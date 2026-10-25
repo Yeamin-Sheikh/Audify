@@ -201,6 +201,7 @@ DEFAULT_CONFIG: dict = {
     "rate": "+50%",
     "volume": 1.0,
     "skip_code_blocks": True,
+    "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
     "dictation_hotkey": "double_lctrl",
     "paste_last_hotkey": "ctrl+alt+v",
@@ -343,6 +344,9 @@ def load_config() -> dict:
         stt_changed = True
     if not isinstance(config.get("stt_silence_delay"), (int, float)):
         config["stt_silence_delay"] = 1.0
+        stt_changed = True
+    if config.get("theme_mode") not in ("system", "light", "dark"):
+        config["theme_mode"] = "system"
         stt_changed = True
     if stt_changed and not changed:
         save_config(config)
