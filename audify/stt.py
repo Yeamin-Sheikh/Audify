@@ -31,7 +31,12 @@ import tempfile
 import threading
 import time
 import wave
-from typing import TYPE_CHECKING, Callable
+import difflib
+import re
+from typing import TYPE_CHECKING, Any, Callable
+
+from audify.clipboard import get_clipboard_text
+from audify.config import apply_stt_vocabulary, set_stt_vocab_rule
 
 if TYPE_CHECKING:
     from audify.engine import TTSDaemon
@@ -417,12 +422,16 @@ VK_RSHIFT = 0xA1
 VK_LMENU = 0xA4
 VK_RMENU = 0xA5
 VK_V = 0x56
+VK_C = 0x43
+VK_CAPITAL = 0x14
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 _user32.GetAsyncKeyState.restype = wintypes.SHORT
+_user32.GetKeyState.argtypes = [ctypes.c_int]
+_user32.GetKeyState.restype = wintypes.SHORT
 
 _user32.OpenClipboard.argtypes = [wintypes.HWND]
 _user32.OpenClipboard.restype = wintypes.BOOL
@@ -495,6 +504,437 @@ def send_ctrl_v() -> None:
     time.sleep(0.015)
     _user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
     _user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+
+def send_ctrl_c() -> None:
+    """Simulate Ctrl+C keystrokes to silently inspect the currently highlighted word."""
+    _user32.keybd_event(VK_CONTROL, 0, 0, 0)
+    _user32.keybd_event(VK_C, 0, 0, 0)
+    time.sleep(0.012)
+    _user32.keybd_event(VK_C, 0, KEYEVENTF_KEYUP, 0)
+    _user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+
+# -- Automatic Double-Click Correction Learner -------------------------------
+
+_IGNORED_MODIFIER_NAMES = frozenset(
+    {
+        "shift",
+        "left shift",
+        "right shift",
+        "ctrl",
+        "left ctrl",
+        "right ctrl",
+        "alt",
+        "left alt",
+        "right alt",
+        "alt gr",
+        "caps lock",
+        "left windows",
+        "right windows",
+    }
+)
+
+_COMMIT_KEY_NAMES = frozenset(
+    {
+        "space",
+        "enter",
+        "tab",
+        "up",
+        "down",
+        "left",
+        "right",
+        "home",
+        "end",
+        "dot",
+        "comma",
+        ".",
+        ",",
+        "!",
+        "?",
+        ";",
+        ":",
+    }
+)
+
+
+class DictationCorrectionLearner:
+    """Watches for double-click word edits after dictation and auto-learns STT vocabulary rules.
+
+    Workflow:
+      1. After Bark 3.0 Clean pastes a transcription, ``record_dictation(text)`` opens a
+         3-minute learning window and indexes the words in the dictated text.
+      2. If the user double-clicks a word in any application (two left-clicks within
+         550ms and 12px), ``on_mouse_click`` starts a keystroke capture session and
+         runs a background clipboard probe (``Ctrl+C`` + restore) to identify the exact
+         highlighted word from the recent dictation.
+      3. As the user types the replacement spelling on their keyboard, ``on_key_press``
+         records the characters (handling Shift, Caps Lock, Backspace, or ``Ctrl+V``).
+      4. When the user finishes typing (presses Space, Enter, Tab, arrow keys, punctuation,
+         clicks the mouse, or pauses typing for 1.2s), ``_commit_correction`` saves
+         ``heard -> written`` into ``config["stt_vocabulary"]`` so future dictations
+         automatically write the user's preferred spelling.
+    """
+
+    LEARNING_WINDOW_S = 180.0
+    DBLCLICK_MAX_INTERVAL_S = 0.55
+    DBLCLICK_MAX_DIST_PX = 12
+    COMMIT_PAUSE_S = 1.2
+
+    def __init__(self, daemon: TTSDaemon | None = None) -> None:
+        self.daemon = daemon
+        self._lock = threading.Lock()
+        self._last_text: str = ""
+        self._last_words: list[str] = []
+        self._last_dictation_time: float = 0.0
+
+        # Double-click state
+        self._last_click_time: float = 0.0
+        self._last_click_pos: tuple[int, int] = (-9999, -9999)
+        self._pending_dblclick_release: bool = False
+
+        # Active correction capture session
+        self._session_id: int = 0
+        self._capturing_keys: bool = False
+        self._capture_start_time: float = 0.0
+        self._selected_word: str = ""
+        self._typed_chars: list[str] = []
+        self._commit_timer: threading.Timer | None = None
+
+        # Suppresses TTS readback while probing the double-clicked selection
+        self.is_probing_clipboard: bool = False
+        self.last_probe_time: float = 0.0
+
+    def record_dictation(self, text: str) -> None:
+        """Record newly dictated text and open the double-click learning window."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        words: list[str] = []
+        seen_lower: set[str] = set()
+        for w in re.findall(r"[A-Za-z0-9']+", cleaned):
+            w_clean = w.strip("'")
+            if len(w_clean) >= 2 and w_clean.lower() not in seen_lower:
+                seen_lower.add(w_clean.lower())
+                words.append(w_clean)
+
+        with self._lock:
+            self._cancel_capture_locked()
+            self._last_text = cleaned
+            self._last_words = words
+            self._last_dictation_time = time.monotonic()
+
+    def on_mouse_click(self, x: int, y: int, button: Any, pressed: bool) -> None:
+        """Detect double-clicks on dictated words or commit an in-progress correction on click."""
+        btn_str = str(button).lower()
+        if not btn_str.endswith("left"):
+            if pressed and self._capturing_keys:
+                self._commit_or_cancel()
+            return
+
+        now = time.monotonic()
+        if pressed:
+            # If the user was typing a correction and clicked elsewhere, commit it first
+            if self._capturing_keys:
+                if self._typed_chars:
+                    self._commit_correction()
+                else:
+                    self._cancel_capture()
+
+            with self._lock:
+                if (
+                    not self._last_text
+                    or (now - self._last_dictation_time) > self.LEARNING_WINDOW_S
+                ):
+                    self._last_click_time = now
+                    self._last_click_pos = (x, y)
+                    self._pending_dblclick_release = False
+                    return
+
+                dt = now - self._last_click_time
+                dx = abs(x - self._last_click_pos[0])
+                dy = abs(y - self._last_click_pos[1])
+                if (
+                    dt <= self.DBLCLICK_MAX_INTERVAL_S
+                    and dx <= self.DBLCLICK_MAX_DIST_PX
+                    and dy <= self.DBLCLICK_MAX_DIST_PX
+                ):
+                    self._pending_dblclick_release = True
+                    self._last_click_time = 0.0
+                    self._start_capture_session_locked(now)
+                else:
+                    self._last_click_time = now
+                    self._last_click_pos = (x, y)
+                    self._pending_dblclick_release = False
+        else:
+            with self._lock:
+                if not self._pending_dblclick_release:
+                    return
+                self._pending_dblclick_release = False
+                session_id = self._session_id
+
+            threading.Thread(
+                target=self._probe_selected_word,
+                args=(session_id,),
+                daemon=True,
+                name="stt-dblclick-probe",
+            ).start()
+
+    def _start_capture_session_locked(self, now: float) -> None:
+        self._cancel_capture_locked()
+        self._session_id += 1
+        self._capturing_keys = True
+        self._capture_start_time = now
+        self._selected_word = ""
+        self._typed_chars = []
+
+    def _probe_selected_word(self, session_id: int) -> None:
+        """Silently copy the double-clicked word to identify which dictated word is being fixed."""
+        time.sleep(0.025)
+        with self._lock:
+            if (
+                not self._capturing_keys
+                or self._session_id != session_id
+                or self._typed_chars
+            ):
+                return
+            last_words = list(self._last_words)
+            last_text = self._last_text
+
+        self.is_probing_clipboard = True
+        self.last_probe_time = time.monotonic()
+        try:
+            prev_clip = get_clipboard_text()
+            if self.daemon is not None:
+                self.daemon.last_ctrl_c_time = 0.0
+
+            send_ctrl_c()
+            time.sleep(0.035)
+            self.last_probe_time = time.monotonic()
+            sel = (get_clipboard_text() or "").strip()
+
+            if isinstance(prev_clip, str) and prev_clip and prev_clip != sel:
+                set_clipboard_text(prev_clip)
+                if self.daemon is not None:
+                    try:
+                        self.daemon._clip_listener._last_text = prev_clip
+                        self.daemon._clip_listener._last_update_time = time.monotonic()
+                    except Exception:
+                        pass
+            if self.daemon is not None:
+                self.daemon.last_ctrl_c_time = 0.0
+        finally:
+            self.last_probe_time = time.monotonic()
+            self.is_probing_clipboard = False
+
+        if not sel or len(sel) > 48:
+            return
+
+        m = re.search(r"[A-Za-z0-9']+", sel)
+        if not m:
+            return
+        clicked_word = m.group(0).strip("'")
+        if len(clicked_word) < 2:
+            return
+
+        matched = ""
+        for w in last_words:
+            if w.lower() == clicked_word.lower():
+                matched = w
+                break
+        if not matched and clicked_word.lower() in last_text.lower():
+            matched = clicked_word
+
+        with self._lock:
+            if self._session_id != session_id or not self._capturing_keys:
+                return
+            if matched:
+                self._selected_word = matched
+            else:
+                self._cancel_capture_locked()
+
+    def on_key_press(self, event: Any) -> None:
+        """Record replacement characters typed after double-clicking a dictated word."""
+        if not self._capturing_keys:
+            return
+
+        now = time.monotonic()
+        if (now - self._capture_start_time) > 20.0:
+            self._cancel_capture()
+            return
+
+        name_raw = str(getattr(event, "name", "") or "")
+        name_low = name_raw.lower()
+        if not name_low or name_low in _IGNORED_MODIFIER_NAMES:
+            return
+
+        ctrl = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        alt = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+
+        if ctrl or alt:
+            if ctrl and not alt and name_low == "c":
+                return
+            if ctrl and not alt and name_low == "v":
+                threading.Thread(
+                    target=self._commit_from_paste,
+                    daemon=True,
+                    name="stt-paste-learn",
+                ).start()
+                return
+            self._cancel_capture()
+            return
+
+        if name_low == "esc":
+            self._cancel_capture()
+            return
+
+        if name_low == "backspace":
+            with self._lock:
+                if self._typed_chars:
+                    self._typed_chars.pop()
+                    self._reset_commit_timer_locked()
+            return
+
+        if len(name_raw) == 1 and (name_raw.isalnum() or name_raw in ("'", "-")):
+            shift = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+            caps = bool(_user32.GetKeyState(VK_CAPITAL) & 0x0001)
+            if name_raw.isalpha():
+                ch = name_raw.upper() if (shift ^ caps) else name_raw.lower()
+            else:
+                ch = name_raw
+            with self._lock:
+                self._typed_chars.append(ch)
+                self._reset_commit_timer_locked()
+            return
+
+        if name_low in _COMMIT_KEY_NAMES:
+            self._commit_or_cancel()
+
+    def _commit_from_paste(self) -> None:
+        time.sleep(0.03)
+        pasted = (get_clipboard_text() or "").strip()
+        if not pasted or len(pasted) > 48:
+            self._cancel_capture()
+            return
+        with self._lock:
+            self._typed_chars = list(pasted)
+        self._commit_correction()
+
+    def _reset_commit_timer_locked(self) -> None:
+        if self._commit_timer is not None:
+            self._commit_timer.cancel()
+        self._commit_timer = threading.Timer(
+            self.COMMIT_PAUSE_S, self._commit_correction
+        )
+        self._commit_timer.daemon = True
+        self._commit_timer.start()
+
+    def _commit_or_cancel(self) -> None:
+        with self._lock:
+            has_chars = bool(self._typed_chars)
+        if has_chars:
+            self._commit_correction()
+        else:
+            self._cancel_capture()
+
+    def _cancel_capture(self) -> None:
+        with self._lock:
+            self._cancel_capture_locked()
+
+    def _cancel_capture_locked(self) -> None:
+        if self._commit_timer is not None:
+            self._commit_timer.cancel()
+            self._commit_timer = None
+        self._capturing_keys = False
+        self._selected_word = ""
+        self._typed_chars = []
+
+    def _resolve_target_word(
+        self, selected_word: str, last_words: list[str], replacement: str
+    ) -> str:
+        """Resolve which dictated word was replaced, using clipboard probe or fuzzy match."""
+        if selected_word:
+            return selected_word
+        if not last_words:
+            return ""
+        if len(last_words) == 1:
+            return last_words[0]
+
+        rep_low = replacement.lower()
+        best_word = ""
+        best_score = 0.0
+        for candidate in last_words:
+            cand_low = candidate.lower()
+            if cand_low == rep_low:
+                continue
+            score = difflib.SequenceMatcher(None, cand_low, rep_low).ratio()
+            if cand_low[:1] == rep_low[:1]:
+                score += 0.1
+            if score > best_score:
+                best_score = score
+                best_word = candidate
+        return best_word if best_score >= 0.42 else ""
+
+    def _commit_correction(self) -> None:
+        """Persist the learned ``heard -> written`` rule into ``stt_vocabulary``."""
+        with self._lock:
+            if not self._capturing_keys:
+                return
+            replacement = "".join(self._typed_chars).strip("'- ")
+            selected_word = self._selected_word
+            last_words = list(self._last_words)
+            self._cancel_capture_locked()
+
+        if len(replacement) < 2:
+            return
+
+        heard = self._resolve_target_word(selected_word, last_words, replacement)
+        if not heard or len(heard) < 2 or heard == replacement:
+            return
+
+        if self.daemon is not None:
+            with self.daemon._config_lock:
+                saved = set_stt_vocab_rule(self.daemon.config, heard, replacement)
+        else:
+            from audify.config import load_config
+
+            cfg = load_config()
+            saved = set_stt_vocab_rule(cfg, heard, replacement)
+
+        if not saved:
+            return
+
+        pat = re.compile(rf"(?<!\w){re.escape(heard)}(?!\w)", re.IGNORECASE)
+        with self._lock:
+            if self._last_text:
+                self._last_text = pat.sub(replacement, self._last_text)
+            self._last_words = [
+                replacement if w.lower() == heard.lower() else w
+                for w in self._last_words
+            ]
+
+        if self.daemon is not None:
+            if self.daemon.stt.last_dictated:
+                self.daemon.stt.last_dictated = pat.sub(
+                    replacement, self.daemon.stt.last_dictated
+                )
+            print(f"[STT Auto-Learn] Learned correction: '{heard}' -> '{replacement}'")
+            self.daemon._set_status(
+                f"Learned: {heard} -> {replacement}", speaking=False
+            )
+
+            def _restore_ready() -> None:
+                if (
+                    self.daemon is not None
+                    and not self.daemon.is_speaking
+                    and not self.daemon.stt.is_busy
+                    and self.daemon.status.startswith("Learned:")
+                ):
+                    self.daemon._set_status("Ready", speaking=False)
+
+            t = threading.Timer(2.8, _restore_ready)
+            t.daemon = True
+            t.start()
 
 
 # -- Embedded Sidecar Worker Script for Bark 3.0 Clean -----------------------
@@ -749,6 +1189,7 @@ class BarkCleanController:
     def __init__(self, daemon: TTSDaemon | None = None) -> None:
         self.daemon = daemon
         self.recorder = Win32MicRecorder()
+        self.learner = DictationCorrectionLearner(daemon=daemon)
         self.last_dictated: str = ""
         self._lock = threading.Lock()
         self._transcribing = False
@@ -936,7 +1377,12 @@ class BarkCleanController:
         self._reset_idle_timer()
         res = self._last_result or {}
         if res.get("ok"):
-            return True, str(res.get("text", "")).strip()
+            raw_text = str(res.get("text", "")).strip()
+            if raw_text and self.daemon is not None:
+                with self.daemon._config_lock:
+                    vocab = dict(self.daemon.config.get("stt_vocabulary", {}))
+                raw_text = apply_stt_vocabulary(raw_text, vocab)
+            return True, raw_text
         err_msg = str(res.get("error", "Unknown transcription error"))
         if self.daemon is not None:
             self.daemon._notify_error(f"Bark 3.0 Clean error: {err_msg}")
@@ -957,6 +1403,7 @@ class BarkCleanController:
 
         if set_clipboard_text(text):
             send_ctrl_v()
+            self.learner.record_dictation(text)
             if self.daemon is not None:
                 self.daemon._notify_state_change()
                 preview = text if len(text) <= 70 else text[:67] + "..."

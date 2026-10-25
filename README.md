@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.7.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.8.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -118,6 +118,7 @@ Download **`Audify.exe`** and run it from anywhere.
 | Dictate speech to text (Bark 3.0 Clean) | Press `Ctrl+Alt+D` once and speak; automatically stops, transcribes, and pastes when you pause |
 | Re-paste last dictation | `Ctrl+Alt+V` (or Tray -> **Paste Last Dictation**) if your cursor missed the input box |
 | Change global shortcuts | Open **Control Center...** and click any shortcut badge (`Dictate`, `Paste last dictation`, `Stop playback`) |
+| Teach STT custom names/words | After dictating, double-click any misheard word and type the fix (auto-learns!), or manage in **Control Center -> STT Vocabulary** |
 | Change voice | Tray -> **Voice** |
 | Change speed | Tray -> **Speed** |
 | Change volume | Tray -> **Volume** |
@@ -198,6 +199,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.8
+
+- **STT Custom Vocabulary & Double-Click Auto-Learning**: added `stt_vocabulary` in `config.json`, `DictationCorrectionLearner` in `audify/stt.py`, and the **STT Vocabulary (Voice Dictation Auto-Learn)** tab in the Control Center. Whenever Bark 3.0 Clean transcribes a sentence and writes a name, app, or place wrong, simply **double-click the misheard word and type the corrected spelling**: Audify automatically detects which dictated word was double-clicked and what replacement you typed, saves the `heard -> written` rule into `stt_vocabulary`, updates `last_dictated`, and applies your custom spelling to all future dictations.
 
 ### v2.9.7
 

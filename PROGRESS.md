@@ -13,6 +13,26 @@
 
 ## Progress log
 
+### 2026-10-25, v2.9.8 STT Custom Vocabulary and Double-Click Auto-Correction Learner
+
+**Duration:** ~10m
+**Status:** Done
+
+#### What changed
+- Added `stt_vocabulary` (`DEFAULT_STT_VOCABULARY`, `set_stt_vocab_rule`, `remove_stt_vocab_rule`, `apply_stt_vocabulary`) in `audify/config.py` so custom names of people, apps, and places are automatically substituted in Bark 3.0 Clean transcriptions.
+- Added `DictationCorrectionLearner` in `audify/stt.py` and wired mouse/keyboard hooks in `audify/engine.py`: after dictating, if the user double-clicks a misheard word in any application and types the corrected spelling, Audify silently probes the selected word, captures the typed replacement, saves `heard -> written` into `stt_vocabulary`, and updates `last_dictated`.
+- Added a segmented mode switcher (`TTS Pronunciation` | `STT Vocabulary (Voice Dictation Auto-Learn)`) in `audify/gui/control_center.py` with live table synchronization when new corrections are auto-learned.
+- Bumped version to `2.9.8`.
+
+#### Files touched
+- `audify/config.py`, added `DEFAULT_STT_VOCABULARY`, `set_stt_vocab_rule()`, `remove_stt_vocab_rule()`, and `apply_stt_vocabulary()`.
+- `audify/stt.py`, added `send_ctrl_c()`, `DictationCorrectionLearner`, and wired vocabulary replacement + learning into `BarkCleanController`.
+- `audify/engine.py`, forwarded mouse and keyboard events to `self.stt.learner` and suppressed TTS readback during double-click clipboard probing.
+- `audify/gui/control_center.py`, added `TTS Pronunciation` / `STT Vocabulary` mode switcher and live auto-learn table sync.
+- `audify/__main__.py`, `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.8`.
+
+---
+
 ### 2026-10-25, v2.9.7 Customizable global shortcuts and Paste Last Dictation
 
 **Duration:** ~6m

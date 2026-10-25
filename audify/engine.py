@@ -312,7 +312,7 @@ class TTSDaemon:
             pass
         while True:
             try:
-                if check_copy_keys():
+                if check_copy_keys() and not self.stt.learner.is_probing_clipboard and (time.monotonic() - self.stt.learner.last_probe_time) >= 0.25:
                     self.last_ctrl_c_time = time.time()
                 if self._is_stop_combo_down():
                     self.stop_audio()
@@ -340,8 +340,12 @@ class TTSDaemon:
             keyboard._pressed_events.clear()
         except Exception:
             pass
+        try:
+            self.stt.learner.on_key_press(event)
+        except Exception:
+            pass
         name = (getattr(event, "name", "") or "").lower()
-        if name in ("c", "x", "insert", "ins") and is_ctrl_pressed():
+        if name in ("c", "x", "insert", "ins") and is_ctrl_pressed() and not self.stt.learner.is_probing_clipboard:
             self.last_ctrl_c_time = time.time()
         elif self._is_stop_combo_down():
             self.stop_audio()
@@ -355,7 +359,11 @@ class TTSDaemon:
     def on_mouse_click(
         self, x: int, y: int, button: pynput_mouse.Button, pressed: bool
     ) -> None:
-        """Record timestamp on any mouse click (for Wispr Flow heuristic)."""
+        """Record timestamp on any mouse click (for Wispr Flow heuristic) and notify STT learner."""
+        try:
+            self.stt.learner.on_mouse_click(x, y, button, pressed)
+        except Exception:
+            pass
         if pressed:
             self.last_ctrl_c_time = time.time()
 
@@ -840,6 +848,9 @@ class TTSDaemon:
 
     def _on_clipboard_change(self, text: str) -> None:
         if self.is_paused or not text.strip():
+            return
+        if self.stt.learner.is_probing_clipboard or (time.monotonic() - self.stt.learner.last_probe_time) < 0.35:
+            return
             return
         if is_just_url(text):
             return

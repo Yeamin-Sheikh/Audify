@@ -187,6 +187,15 @@ from audify.pronunciation_library import LIBRARY as _LIBRARY  # noqa: E402
 for _word, _spoken in _LIBRARY.items():
     DEFAULT_PRONUNCIATION.setdefault(_word, _spoken)
 
+# -- Default Speech-to-Text (STT) custom vocabulary / auto-learned replacements
+DEFAULT_STT_VOCABULARY: dict[str, str] = {
+    "AudiFi": "Audify",
+    "Audifi": "Audify",
+    "Yamin": "Yeamin",
+    "Yemen Sheikh": "Yeamin Sheikh",
+    "Projen Factory": "Pro Gen Factory",
+}
+
 DEFAULT_CONFIG: dict = {
     "voice": "en-US-JennyNeural",
     "rate": "+50%",
@@ -196,6 +205,8 @@ DEFAULT_CONFIG: dict = {
     "dictation_hotkey": "ctrl+alt+d",
     "paste_last_hotkey": "ctrl+alt+v",
     "pronunciation_dict": {},
+    "stt_vocabulary": {},
+    "removed_stt_vocabulary": [],
     # Built-in rules the user deleted; never re-added on startup
     "removed_default_rules": [],
 }
@@ -307,6 +318,19 @@ def load_config() -> dict:
     if changed:
         save_config(config)
 
+    stt_vocab = config.setdefault("stt_vocabulary", {})
+    if not isinstance(stt_vocab, dict):
+        stt_vocab = {}
+        config["stt_vocabulary"] = stt_vocab
+    removed_stt = set(config.setdefault("removed_stt_vocabulary", []))
+    stt_changed = False
+    for k, v in DEFAULT_STT_VOCABULARY.items():
+        if k not in stt_vocab and k not in removed_stt:
+            stt_vocab[k] = v
+            stt_changed = True
+    if stt_changed and not changed:
+        save_config(config)
+
     return config
 
 
@@ -366,3 +390,56 @@ def is_just_url(text: str) -> bool:
     text = text.strip()
     pattern = r"^(https?:\/\/)?(www\.)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/[^\s]*)?$"
     return bool(re.match(pattern, text))
+
+
+def set_stt_vocab_rule(config: dict, heard: str, written: str) -> bool:
+    """Add or update an STT vocabulary mapping ('heard' -> 'written') and persist config."""
+    heard_clean = (heard or "").strip()
+    written_clean = (written or "").strip()
+    if not heard_clean or not written_clean:
+        return False
+    vocab = config.setdefault("stt_vocabulary", {})
+    for existing_key in list(vocab.keys()):
+        if existing_key.lower() == heard_clean.lower() and existing_key != heard_clean:
+            vocab.pop(existing_key, None)
+    vocab[heard_clean] = written_clean
+    removed = config.setdefault("removed_stt_vocabulary", [])
+    for k in list(removed):
+        if k.lower() == heard_clean.lower():
+            removed.remove(k)
+    save_config(config)
+    return True
+
+
+def remove_stt_vocab_rule(config: dict, heard: str) -> None:
+    """Delete an STT vocabulary mapping and persist config."""
+    vocab = config.get("stt_vocabulary", {})
+    if isinstance(vocab, dict):
+        for k in list(vocab.keys()):
+            if k == heard or k.lower() == heard.lower():
+                vocab.pop(k, None)
+    for def_key in DEFAULT_STT_VOCABULARY:
+        if def_key.lower() == heard.lower():
+            removed = config.setdefault("removed_stt_vocabulary", [])
+            if def_key not in removed:
+                removed.append(def_key)
+    save_config(config)
+
+
+def apply_stt_vocabulary(text: str, vocab: dict[str, str] | None) -> str:
+    """Apply user STT vocabulary replacements (case-insensitive word-boundary match)."""
+    if not text or not vocab:
+        return text
+    items = [
+        (k.strip(), v.strip())
+        for k, v in vocab.items()
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+    ]
+    if not items:
+        return text
+    items.sort(key=lambda kv: len(kv[0]), reverse=True)
+    out = text
+    for heard, written in items:
+        pat = re.compile(rf"(?<!\w){re.escape(heard)}(?!\w)", re.IGNORECASE)
+        out = pat.sub(written, out)
+    return out

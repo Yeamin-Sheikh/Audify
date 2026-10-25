@@ -116,6 +116,7 @@ def _selftest(report_path: str) -> int:
             is_bluetooth_restarting,
         )
         from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
+        from audify.config import apply_stt_vocabulary
         from audify.stt import BarkCleanController, find_bark_python, get_bark_dir
 
         if DEFAULT_BT_INSTANCE_ID not in _BATCH_SCRIPT or is_bluetooth_restarting():
@@ -131,6 +132,11 @@ def _selftest(report_path: str) -> int:
         ctrl = BarkCleanController()
         if ctrl.is_busy:
             raise RuntimeError("BarkCleanController unexpectedly busy at init")
+        if apply_stt_vocabulary("Hello Yamin", {"Yamin": "Yeamin"}) != "Hello Yeamin":
+            raise RuntimeError("apply_stt_vocabulary failed word replacement check")
+        ctrl.learner.record_dictation("Hello Yamin from Projen")
+        if ctrl.learner._resolve_target_word("", ctrl.learner._last_words, "Yeamin") != "Yamin":
+            raise RuntimeError("DictationCorrectionLearner fuzzy target resolution failed")
         lines.append(
             f"system-tools: ok (bluetooth={DEFAULT_BT_INSTANCE_ID}, icon-cache=ready, bark-3.0-clean={bark_py})"
         )

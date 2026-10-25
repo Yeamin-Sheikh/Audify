@@ -13,7 +13,15 @@ if TYPE_CHECKING:
 from audify import __version__
 from audify.bluetooth import is_bluetooth_restarting, restart_bluetooth_driver
 from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
-from audify.config import VOICES, RATES, remove_rule, save_config, set_rule
+from audify.config import (
+    VOICES,
+    RATES,
+    remove_rule,
+    remove_stt_vocab_rule,
+    save_config,
+    set_rule,
+    set_stt_vocab_rule,
+)
 from audify.gui.widgets import (
     FluentSlider,
     FluentToggle,
@@ -231,7 +239,12 @@ def _run_control_center(daemon: Any) -> None:
 
     _configure_styles(root, S)
 
-    dict_ref: dict[str, str] = daemon.config.setdefault("pronunciation_dict", {})
+    tts_dict_ref: dict[str, str] = daemon.config.setdefault("pronunciation_dict", {})
+    stt_vocab_ref: dict[str, str] = daemon.config.setdefault("stt_vocabulary", {})
+    active_mode: list[str] = ["tts"]
+
+    def get_active_dict() -> dict[str, str]:
+        return stt_vocab_ref if active_mode[0] == "stt" else tts_dict_ref
 
     main_frame = tk.Frame(root, bg=BG_COLOR)
     main_frame.pack(fill=tk.BOTH, expand=True, padx=S(20), pady=S(20))
@@ -604,20 +617,48 @@ def _run_control_center(daemon: Any) -> None:
 
     # Header: title + subtitle on the left, rule count badge on the right
     header_frame = tk.Frame(dict_frame, bg=BG_COLOR)
-    header_frame.pack(fill=tk.X, pady=(0, S(14)))
+    header_frame.pack(fill=tk.X, pady=(0, S(10)))
     title_box = tk.Frame(header_frame, bg=BG_COLOR)
     title_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    ttk.Label(title_box, text="Pronunciation Dictionary", style="Header.TLabel").pack(anchor=tk.W)
-    ttk.Label(
+    header_title_lbl = ttk.Label(title_box, text="Pronunciation Dictionary", style="Header.TLabel")
+    header_title_lbl.pack(anchor=tk.W)
+    header_sub_lbl = ttk.Label(
         title_box,
         text="Tell Audify how to say symbols, acronyms and technical terms.",
         style="Sub.TLabel",
-    ).pack(anchor=tk.W, pady=(S(2), 0))
+    )
+    header_sub_lbl.pack(anchor=tk.W, pady=(S(2), 0))
 
     count_border = tk.Frame(header_frame, bg=BORDER_COLOR)
     count_border.pack(side=tk.RIGHT, anchor=tk.N, pady=(S(6), 0))
     count_label = ttk.Label(count_border, style="Badge.TLabel")
     count_label.pack(padx=1, pady=1)
+
+    # Segmented mode switcher: TTS Pronunciation vs STT Vocabulary (Auto-Learn)
+    mode_bar = tk.Frame(dict_frame, bg=CARD_COLOR, highlightthickness=1, highlightbackground=BORDER_COLOR)
+    mode_bar.pack(fill=tk.X, pady=(0, S(10)))
+    mode_tts_btn = tk.Label(
+        mode_bar,
+        text="TTS Pronunciation (Read Aloud)",
+        bg=ACCENT_COLOR,
+        fg="#ffffff",
+        font=("Segoe UI Semibold", 9),
+        padx=S(14),
+        pady=S(6),
+        cursor="hand2",
+    )
+    mode_tts_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    mode_stt_btn = tk.Label(
+        mode_bar,
+        text="STT Vocabulary (Voice Dictation Auto-Learn)",
+        bg=CARD_COLOR,
+        fg=TEXT_MUTED,
+        font=("Segoe UI Semibold", 9),
+        padx=S(14),
+        pady=S(6),
+        cursor="hand2",
+    )
+    mode_stt_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     # Search bar
     search_var = tk.StringVar()
@@ -691,22 +732,29 @@ def _run_control_center(daemon: Any) -> None:
 
     # Rules are keyed by iid = original word, so values are never coerced (e.g. "1" -> int)
     def refresh_tree(select: str | None = None) -> None:
+        cur_dict = get_active_dict()
         query = search_var.get().strip().lower()
         tree.delete(*tree.get_children())
         shown = 0
-        for w in sorted(dict_ref.keys(), key=str.lower):
-            s = dict_ref[w]
+        for w in sorted(cur_dict.keys(), key=str.lower):
+            s = cur_dict[w]
             if query and query not in w.lower() and query not in s.lower():
                 continue
             shown += 1
             tree.insert("", tk.END, iid=w, values=(shown, w, s), tags=("odd" if shown % 2 == 0 else "even",))
 
-        total = len(dict_ref)
+        total = len(cur_dict)
         count_label.config(text=f"{total} rule{'s' if total != 1 else ''}" if not query else f"{shown} of {total}")
 
         if shown == 0:
-            empty_label.config(text=f"No rules match “{search_var.get().strip()}”" if query
-                               else "No rules yet.\nAdd one below to get started.")
+            if query:
+                empty_label.config(text=f"No rules match “{search_var.get().strip()}”")
+            elif active_mode[0] == "stt":
+                empty_label.config(
+                    text="No custom STT words yet.\nAdd one below, or double-click a misheard word after dictating to auto-learn it."
+                )
+            else:
+                empty_label.config(text="No rules yet.\nAdd one below to get started.")
             empty_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         else:
             empty_label.place_forget()
@@ -721,8 +769,10 @@ def _run_control_center(daemon: Any) -> None:
     editor.grid_columnconfigure(0, weight=1, uniform="inputs")
     editor.grid_columnconfigure(1, weight=1, uniform="inputs")
 
-    ttk.Label(editor, text="Word or symbol", style="Field.TLabel").grid(row=0, column=0, sticky=tk.W, pady=(0, S(6)))
-    ttk.Label(editor, text="Spoken as", style="Field.TLabel").grid(row=0, column=1, sticky=tk.W, padx=(S(12), 0), pady=(0, S(6)))
+    field_left_lbl = ttk.Label(editor, text="Word or symbol", style="Field.TLabel")
+    field_left_lbl.grid(row=0, column=0, sticky=tk.W, pady=(0, S(6)))
+    field_right_lbl = ttk.Label(editor, text="Spoken as", style="Field.TLabel")
+    field_right_lbl.grid(row=0, column=1, sticky=tk.W, padx=(S(12), 0), pady=(0, S(6)))
 
     word_var = tk.StringVar()
     word_entry_frame, word_entry = create_fluent_entry(
@@ -772,10 +822,14 @@ def _run_control_center(daemon: Any) -> None:
         elif not s:
             spoken_entry.focus_set()
         else:
-            existed = w in dict_ref
+            cur_dict = get_active_dict()
+            existed = w in cur_dict
             with config_lock:
-                set_rule(daemon.config, w, s)
-            persist()
+                if active_mode[0] == "stt":
+                    set_stt_vocab_rule(daemon.config, w, s)
+                else:
+                    set_rule(daemon.config, w, s)
+                    save_config(daemon.config)
             refresh_tree(select=w)
             word_var.set("")
             spoken_var.set("")
@@ -794,7 +848,41 @@ def _run_control_center(daemon: Any) -> None:
 
     def update_editor_state(*args) -> None:
         w = word_var.get().strip()
-        add_btn.config(text="Update Rule" if w in dict_ref else "Add Rule")
+        cur_dict = get_active_dict()
+        add_btn.config(text="Update Rule" if w in cur_dict else "Add Rule")
+
+    def switch_mode(new_mode: str) -> None:
+        if active_mode[0] == new_mode:
+            return
+        active_mode[0] = new_mode
+        if new_mode == "stt":
+            mode_stt_btn.config(bg=ACCENT_COLOR, fg="#ffffff")
+            mode_tts_btn.config(bg=CARD_COLOR, fg=TEXT_MUTED)
+            header_title_lbl.config(text="Speech-to-Text Vocabulary")
+            header_sub_lbl.config(
+                text="Custom words, names & places (auto-learns when you double-click and fix a dictated word)."
+            )
+            tree.heading("word", text="HEARD AS (WRONG)", anchor=tk.W)
+            tree.heading("pronunciation", text="WRITTEN AS (CORRECT)", anchor=tk.W)
+            field_left_lbl.config(text="Heard as (misheard word)")
+            field_right_lbl.config(text="Written as (correct spelling)")
+        else:
+            mode_tts_btn.config(bg=ACCENT_COLOR, fg="#ffffff")
+            mode_stt_btn.config(bg=CARD_COLOR, fg=TEXT_MUTED)
+            header_title_lbl.config(text="Pronunciation Dictionary")
+            header_sub_lbl.config(
+                text="Tell Audify how to say symbols, acronyms and technical terms."
+            )
+            tree.heading("word", text="WORD", anchor=tk.W)
+            tree.heading("pronunciation", text="SPOKEN AS", anchor=tk.W)
+            field_left_lbl.config(text="Word or symbol")
+            field_right_lbl.config(text="Spoken as")
+        clear_editor()
+        refresh_tree()
+        on_tree_select(None)
+
+    mode_tts_btn.bind("<Button-1>", lambda _e: switch_mode("tts"))
+    mode_stt_btn.bind("<Button-1>", lambda _e: switch_mode("stt"))
 
     word_var.trace_add("write", update_editor_state)
     spoken_var.trace_add("write", update_editor_state)
@@ -805,24 +893,30 @@ def _run_control_center(daemon: Any) -> None:
         entry.bind("<Escape>", lambda e: (clear_editor(), "break")[1])
 
     def on_tree_select(event) -> None:
+        cur_dict = get_active_dict()
         selected = tree.selection()
         remove_btn.config(state=tk.NORMAL if selected else tk.DISABLED,
                           text=f"Remove {len(selected)} Rules" if len(selected) > 1 else "Remove Selected")
-        if len(selected) == 1 and selected[0] in dict_ref:
+        if len(selected) == 1 and selected[0] in cur_dict:
             word_var.set(selected[0])
-            spoken_var.set(dict_ref[selected[0]])
+            spoken_var.set(cur_dict[selected[0]])
 
     tree.bind("<<TreeviewSelect>>", on_tree_select)
     tree.bind("<Double-1>", lambda e: spoken_entry.focus_set())
 
     def remove_selected(event=None) -> None:
-        words = [w for w in tree.selection() if w in dict_ref]
+        cur_dict = get_active_dict()
+        words = [w for w in tree.selection() if w in cur_dict]
         if not words:
             return
         with config_lock:
             for w in words:
-                remove_rule(daemon.config, w)
-        persist()
+                if active_mode[0] == "stt":
+                    remove_stt_vocab_rule(daemon.config, w)
+                else:
+                    remove_rule(daemon.config, w)
+            if active_mode[0] != "stt":
+                save_config(daemon.config)
         refresh_tree()
         word_var.set("")
         spoken_var.set("")
@@ -847,7 +941,11 @@ def _run_control_center(daemon: Any) -> None:
     root.bind("<Control-f>", focus_search)
     search_entry.bind("<Escape>", lambda e: search_var.set(""))
 
-    # Continuous Active Value Synchronization loop (from Tray menu changes)
+    _last_stt_snapshot: list[tuple[tuple[str, str], ...] | None] = [
+        tuple(sorted(stt_vocab_ref.items()))
+    ]
+
+    # Continuous Active Value Synchronization loop (from Tray menu changes & STT auto-learn)
     def sync_gui_values():
         try:
             if _raise_request.is_set():
@@ -855,6 +953,15 @@ def _run_control_center(daemon: Any) -> None:
                 root.deiconify()
                 root.lift()
                 root.focus_force()
+
+            cur_stt_snap = tuple(sorted(stt_vocab_ref.items()))
+            if cur_stt_snap != _last_stt_snapshot[0]:
+                _last_stt_snapshot[0] = cur_stt_snap
+                if active_mode[0] == "stt":
+                    refresh_tree()
+                st_str = str(getattr(daemon, "status", "") or "")
+                if st_str.startswith("Learned:"):
+                    flash_status(f"Auto-learned {st_str[8:].strip()}", SUCCESS_COLOR)
 
             cur_vol = int(daemon.config.get("volume", 1.0) * 100)
             if vol_var.get() != cur_vol and not vol_slider.is_dragging:
