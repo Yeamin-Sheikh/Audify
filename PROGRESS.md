@@ -6,12 +6,29 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-25
+- **Last updated:** 2026-10-26
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-26, v2.9.14 Read on Copy (Auto TTS) toggle
+
+**Duration:** ~3m
+**Status:** Done
+
+#### What changed
+- Added `read_on_copy: True` to `DEFAULT_CONFIG` (`audify/config.py`) and `TTSDaemon.toggle_read_on_copy()` / `_on_clipboard_change()` guard (`audify/engine.py`).
+- Added the **Read on copy** (`Speak copied text aloud (Ctrl+C)`) WinUI 3 toggle switch in the Settings window (`audify/gui/control_center.py`) and **Read on Copy (Auto TTS)** checkable item in the system tray menu (`audify/tray.py`).
+- Bumped version to `2.9.14`.
+
+#### Files touched
+- `audify/config.py`, `audify/engine.py`, added `read_on_copy` setting and toggle logic.
+- `audify/gui/control_center.py`, `audify/tray.py`, added Read on Copy toggle in Settings and Tray menu.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.14`.
+
+---
 
 ### 2026-10-26, v2.9.13 Minimal learned-word confirmation pill in HUD
 

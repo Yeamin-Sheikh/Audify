@@ -200,6 +200,7 @@ DEFAULT_CONFIG: dict = {
     "voice": "en-US-JennyNeural",
     "rate": "+50%",
     "volume": 1.0,
+    "read_on_copy": True,
     "skip_code_blocks": True,
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
@@ -347,6 +348,9 @@ def load_config() -> dict:
         stt_changed = True
     if config.get("theme_mode") not in ("system", "light", "dark"):
         config["theme_mode"] = "system"
+        stt_changed = True
+    if not isinstance(config.get("read_on_copy"), bool):
+        config["read_on_copy"] = True
         stt_changed = True
     if stt_changed and not changed:
         save_config(config)

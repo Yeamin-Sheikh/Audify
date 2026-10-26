@@ -328,12 +328,12 @@ def _run_settings_window(daemon: Any) -> None:
 
     root.update_idletasks()
     apply_window_theme(root, pal)
-    width, height = S(1040), S(810)
+    width, height = S(1040), S(845)
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.resizable(True, True)
-    root.minsize(S(900), S(740))
+    root.minsize(S(900), S(775))
 
     _configure_styles(root, S, pal)
 
@@ -523,8 +523,48 @@ def _run_settings_window(daemon: Any) -> None:
 
     rate_combo.bind("<<ComboboxSelected>>", on_rate_select)
 
-    add_divider(sidebar, 0, S(12))
+    add_divider(sidebar, 0, S(10))
     section_caption("Reading")
+
+    read_copy_var = tk.BooleanVar(value=daemon.config.get("read_on_copy", True))
+
+    def on_toggle_read_copy() -> None:
+        daemon.toggle_read_on_copy()
+        read_copy_var.set(daemon.config.get("read_on_copy", True))
+
+    read_copy_row = tk.Frame(sidebar, bg=pal["card"], cursor="hand2")
+    read_copy_row.pack(fill=tk.X, pady=(0, S(8)))
+    card_frames.append(read_copy_row)
+    read_copy_chk = FluentToggle(
+        read_copy_row,
+        variable=read_copy_var,
+        command=on_toggle_read_copy,
+        bg=pal["card"],
+        active_color=pal["accent_light"],
+        track_color=pal["card"],
+        border_color=pal["text_muted"],
+        knob_on_color=pal["toggle_knob_on"],
+        knob_off_color=pal["toggle_knob_off"],
+        width=S(40),
+        height=S(20),
+    )
+    read_copy_chk.pack(side=tk.RIGHT, padx=(S(10), 0))
+    read_copy_text = tk.Frame(read_copy_row, bg=pal["card"], cursor="hand2")
+    read_copy_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    card_frames.append(read_copy_text)
+    read_copy_title = ttk.Label(
+        read_copy_text, text="Read on copy", style="Field.TLabel", cursor="hand2"
+    )
+    read_copy_title.pack(anchor=tk.W)
+    read_copy_desc = ttk.Label(
+        read_copy_text,
+        text="Speak copied text aloud (Ctrl+C)",
+        style="CardSub.TLabel",
+        cursor="hand2",
+    )
+    read_copy_desc.pack(anchor=tk.W)
+    for w in (read_copy_row, read_copy_text, read_copy_title, read_copy_desc):
+        w.bind("<Button-1>", lambda e: read_copy_chk._on_click(None))
 
     skip_var = tk.BooleanVar(value=daemon.config.get("skip_code_blocks", True))
 
@@ -1396,6 +1436,7 @@ def _run_settings_window(daemon: Any) -> None:
         _style_mode_bar(new_pal)
 
         vol_slider.apply_palette(new_pal)
+        read_copy_chk.apply_palette(new_pal)
         skip_chk.apply_palette(new_pal)
 
         search_entry_frame.apply_palette(new_pal, field_bg=new_pal["card"])  # type: ignore[attr-defined]
@@ -1485,6 +1526,10 @@ def _run_settings_window(daemon: Any) -> None:
             name = next((n for n, r in RATES.items() if r == cur_rate_val), None)
             if name and rate_var.get() != name:
                 rate_var.set(name)
+
+            cur_read_copy = daemon.config.get("read_on_copy", True)
+            if read_copy_var.get() != cur_read_copy:
+                read_copy_var.set(cur_read_copy)
 
             cur_skip = daemon.config.get("skip_code_blocks", True)
             if skip_var.get() != cur_skip:

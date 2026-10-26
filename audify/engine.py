@@ -500,6 +500,17 @@ class TTSDaemon:
             save_config(self.config)
         self._notify_state_change()
 
+    def toggle_read_on_copy(self) -> None:
+        """Toggle automatic Text-to-Speech when copying text (`read_on_copy`) and save to config."""
+        with self._config_lock:
+            current = bool(self.config.get("read_on_copy", True))
+            new_val = not current
+            self.config["read_on_copy"] = new_val
+            save_config(self.config)
+        if not new_val:
+            self.stop_audio()
+        self._notify_state_change()
+
     # -- Playback controls -------------------------------------------------
 
     def stop_audio(self) -> None:
@@ -919,10 +930,13 @@ class TTSDaemon:
         self._clip_listener.start()
 
     def _on_clipboard_change(self, text: str) -> None:
-        if self.is_paused or not text.strip():
+        if (
+            self.is_paused
+            or not self.config.get("read_on_copy", True)
+            or not text.strip()
+        ):
             return
         if self.stt.learner.is_probing_clipboard or (time.monotonic() - self.stt.learner.last_probe_time) < 0.35:
-            return
             return
         if is_just_url(text):
             return

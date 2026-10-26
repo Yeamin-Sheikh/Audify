@@ -356,6 +356,9 @@ def setup_tray() -> None:
     def on_toggle_skip_code(icon: pystray.Icon, item_action: item) -> None:
         daemon.toggle_skip_code_blocks()
 
+    def on_toggle_read_on_copy(icon: pystray.Icon, item_action: item) -> None:
+        daemon.toggle_read_on_copy()
+
     def on_open_settings(icon: pystray.Icon, item_action: item) -> None:
         threading.Thread(
             target=show_dictionary_ui, args=(daemon,), daemon=True
@@ -524,6 +527,11 @@ def setup_tray() -> None:
             item(
                 lambda text: f"Volume\t{_volume_display_name(daemon)}",
                 Menu(*volume_menu_items),
+            ),
+            item(
+                "Read on Copy (Auto TTS)",
+                on_toggle_read_on_copy,
+                checked=lambda i: daemon.config.get("read_on_copy", True),
             ),
             item(
                 "Skip Code Blocks",

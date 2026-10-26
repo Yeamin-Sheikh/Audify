@@ -202,6 +202,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.14
+
+- **Read on Copy (Auto TTS) Toggle**: added `read_on_copy` (enabled by default) with a **Read on copy** toggle switch in the Settings **Reading** section (`audify/gui/control_center.py`) and a **Read on Copy (Auto TTS)** checkable option in the system tray menu (`audify/tray.py`) so users can disable automatic clipboard reading whenever they want while keeping Speech-to-Text dictation and manual clipboard reading active.
+
 ### v2.9.13
 
 - **Minimal Learned-Word Confirmation Pill**: whenever Audify auto-learns a word correction (or when you save an STT vocabulary rule), the floating bottom pill (`audify/gui/stt_hud.py`) briefly displays a non-obstructive, click-through `✓  Saved: heard → written` confirmation for 2.4 seconds in the exact same spot as the dictation visualizer.
