@@ -6,12 +6,30 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-26
+- **Last updated:** 2026-10-27
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-27, v2.9.16 Fix clean-PC Bark 3.0 model bootstrap and stuck HUD pill
+
+**Duration:** ~15m
+**Status:** Done
+
+#### What changed
+- Added a pure-NumPy Slaney mel filterbank shim (`_install_librosa_shim`) in `_WORKER_SCRIPT` (`audify/stt.py`) to satisfy `ParakeetFeatureExtractor`'s `@requires(backends=("torch", "librosa"))` check without requiring `librosa`/`numba`/`scipy`.
+- Added `msvc-runtime` and `os.add_dll_directory` to `bootstrap_bark_python` and `_WORKER_SCRIPT` (`audify/stt.py`) so `torch` loads on clean Windows PCs that lack the VC++ Redistributable (`msvcp140.dll` / `vcomp140.dll`).
+- Replaced `self._lock` with a dedicated `self._spawn_lock` inside `_ensure_worker_started` (`audify/stt.py`) so background runtime/model installation never blocks `stop_and_transcribe` or `cancel_dictation` or freezes the HUD pill.
+- Added chunked HTTP downloads with 30s timeouts, retries, and live percentage reporting (`set_status`, `clear_status`, `show_error`) on `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) plus a 1.2s idle watchdog so the pill can never stay stuck on screen.
+- Bumped version to `2.9.16`.
+
+#### Files touched
+- `audify/stt.py`, `audify/gui/stt_hud.py`, fixed clean-machine bootstrap, lock contention, and HUD progress/watchdog.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.16`.
+
+---
 
 ### 2026-10-26, v2.9.15 Cancel dictation or transcription with Escape
 

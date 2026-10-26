@@ -994,11 +994,13 @@ class DictationCorrectionLearner:
 # -- Embedded Sidecar Worker Script for Bark 3.0 Clean -----------------------
 
 _WORKER_SCRIPT = r'''"""Persistent JSON-lines sidecar worker for Underdog Bark 3.0 Clean."""
+import importlib.machinery
 import importlib.util
 import json
 import os
 import sys
 import time
+import types
 import urllib.request
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -1006,12 +1008,12 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import numpy as np
-import soundfile as sf
-import torch
-
-# Use physical cores effectively without starving the UI
-torch.set_num_threads(max(2, min(6, os.cpu_count() or 4)))
+try:
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.isdir(exe_dir) and hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(exe_dir)
+except Exception:
+    pass
 
 BARK_DIR = sys.argv[1]
 MODEL_BARK = os.path.join(BARK_DIR, "model.bark")
@@ -1027,34 +1029,159 @@ def emit(obj: dict) -> None:
     sys.stdout.flush()
 
 
+def _install_librosa_shim(np) -> None:
+    """Provide an exact float32 Slaney mel filterbank if librosa is not installed.
+
+    ParakeetFeatureExtractor in transformers is decorated with
+    @requires(backends=('torch', 'librosa')) solely to call
+    librosa.filters.mel(..., norm='slaney'). Registering this pure-NumPy shim
+    satisfies both importlib.util.find_spec('librosa') and the exact filterbank
+    computation without requiring 200+ MB of numba/llvmlite/scipy/scikit-learn.
+    """
+    if importlib.util.find_spec("librosa") is not None:
+        return
+
+    def _mel(
+        *,
+        sr: float = 22050,
+        n_fft: int = 2048,
+        n_mels: int = 128,
+        fmin: float = 0.0,
+        fmax: float | None = None,
+        htk: bool = False,
+        norm: str | None = "slaney",
+        dtype=np.float32,
+    ):
+        if fmax is None:
+            fmax = float(sr) / 2.0
+        n_mels = int(n_mels)
+        weights = np.zeros((n_mels, int(1 + n_fft // 2)), dtype=dtype)
+        fftfreqs = np.fft.rfftfreq(n=n_fft, d=1.0 / sr)
+        f_min = 0.0
+        f_sp = 200.0 / 3.0
+        min_log_hz = 1000.0
+        min_log_mel = (min_log_hz - f_min) / f_sp
+        logstep = np.log(6.4) / 27.0
+
+        def _hz_to_mel(f):
+            f_arr = np.asanyarray(f)
+            mels = (f_arr - f_min) / f_sp
+            if np.ndim(f_arr) > 0:
+                log_region = f_arr >= min_log_hz
+                mels[log_region] = (
+                    min_log_mel + np.log(f_arr[log_region] / min_log_hz) / logstep
+                )
+            elif f_arr >= min_log_hz:
+                mels = min_log_mel + np.log(f_arr / min_log_hz) / logstep
+            return mels
+
+        def _mel_to_hz(mels):
+            m_arr = np.asanyarray(mels)
+            freqs = f_min + f_sp * m_arr
+            log_region = m_arr >= min_log_mel
+            freqs[log_region] = min_log_hz * np.exp(
+                logstep * (m_arr[log_region] - min_log_mel)
+            )
+            return freqs
+
+        mel_f = _mel_to_hz(
+            np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax), n_mels + 2)
+        )
+        fdiff = np.diff(mel_f)
+        ramps = np.subtract.outer(mel_f, fftfreqs)
+        for i in range(n_mels):
+            lower = -ramps[i] / fdiff[i]
+            upper = ramps[i + 2] / fdiff[i + 1]
+            weights[i] = np.maximum(0, np.minimum(lower, upper))
+        if norm == "slaney":
+            enorm = 2.0 / (mel_f[2 : n_mels + 2] - mel_f[:n_mels])
+            weights *= enorm[:, np.newaxis]
+        return weights.astype(dtype)
+
+    lib_mod = types.ModuleType("librosa")
+    lib_mod.__spec__ = importlib.machinery.ModuleSpec("librosa", loader=None)
+    lib_mod.__version__ = "0.10.2"
+    filters_mod = types.ModuleType("librosa.filters")
+    filters_mod.__spec__ = importlib.machinery.ModuleSpec("librosa.filters", loader=None)
+    filters_mod.mel = _mel
+    lib_mod.filters = filters_mod
+    sys.modules["librosa"] = lib_mod
+    sys.modules["librosa.filters"] = filters_mod
+
+
+def _download_with_progress(url: str, dst_path: str, label: str = "") -> None:
+    tmp_path = dst_path + ".part"
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Audify-BarkClean/2.9"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                last_pct = -5
+                with open(tmp_path, "wb") as out_f:
+                    while True:
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+                        downloaded += len(chunk)
+                        if label and total > 0:
+                            pct = min(100, int((downloaded * 100) / total))
+                            if pct - last_pct >= 2 or pct == 100:
+                                last_pct = pct
+                                emit(
+                                    {
+                                        "type": "status",
+                                        "status": f"{label} ({pct}%)...",
+                                    }
+                                )
+            os.replace(tmp_path, dst_path)
+            return
+        except Exception as e:
+            last_err = e
+            time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"Failed to download {url}: {last_err}")
+
+
 def ensure_downloaded() -> None:
     os.makedirs(BARK_DIR, exist_ok=True)
-    if not os.path.isfile(BARK_LOADER):
-        urllib.request.urlretrieve(BARK_LOADER_URL, BARK_LOADER)
+    if not os.path.isfile(BARK_LOADER) or os.path.getsize(BARK_LOADER) < 1000:
+        _download_with_progress(BARK_LOADER_URL, BARK_LOADER)
     if not os.path.isfile(MODEL_BARK) or os.path.getsize(MODEL_BARK) < 179_000_000:
-        emit({"type": "status", "status": "Downloading Bark 3.0 Clean..."})
-        tmp_path = MODEL_BARK + ".part"
-        urllib.request.urlretrieve(BARK_MODEL_URL, tmp_path)
-        os.replace(tmp_path, MODEL_BARK)
+        emit({"type": "status", "status": "Downloading Bark 3.0 model (0%)..."})
+        _download_with_progress(
+            BARK_MODEL_URL, MODEL_BARK, label="Downloading Bark 3.0 model"
+        )
 
 
-def load_bark_clean():
+def load_bark_clean(np, torch):
     import concurrent.futures
-    from transformers import AutoProcessor, GenerationConfig, ParakeetForTDT, ParakeetTDTConfig
 
-    ensure_downloaded()
-    emit({"type": "status", "status": "Loading Bark 3.0 Clean..."})
+    _install_librosa_shim(np)
+    from transformers import (
+        AutoProcessor,
+        GenerationConfig,
+        ParakeetForTDT,
+        ParakeetTDTConfig,
+    )
 
     # Fast path: load already-unpacked safetensors cache if present
     safetensors_path = os.path.join(CACHED_DIR, "model.safetensors")
-    if os.path.isfile(safetensors_path):
+    if os.path.isfile(safetensors_path) and os.path.getsize(safetensors_path) > 100_000_000:
         try:
+            emit({"type": "status", "status": "Loading Bark 3.0 Clean..."})
             model = ParakeetForTDT.from_pretrained(CACHED_DIR, dtype=torch.float32).eval()
             model.generation_config = GenerationConfig.from_pretrained(CACHED_DIR)
             proc = AutoProcessor.from_pretrained(CACHED_DIR)
             return model, proc
         except Exception:
             pass
+
+    ensure_downloaded()
+    emit({"type": "status", "status": "Unpacking Bark 3.0 Clean weights..."})
 
     # First-run path: parallel-unpack model.bark (~13s across 8 threads) and cache to CACHED_DIR
     spec = importlib.util.spec_from_file_location("official_bark", BARK_LOADER)
@@ -1108,6 +1235,7 @@ def load_bark_clean():
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         sd = dict(ex.map(_decode_one, tasks))
 
+    emit({"type": "status", "status": "Configuring Bark 3.0 tokenizer..."})
     cfg = json.loads(head["config"])
     model = ParakeetForTDT(ParakeetTDTConfig.from_dict(cfg))
     model.load_state_dict(sd, strict=False)
@@ -1116,6 +1244,7 @@ def load_bark_clean():
     proc = AutoProcessor.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
 
     try:
+        emit({"type": "status", "status": "Caching Bark 3.0 Clean model..."})
         os.makedirs(CACHED_DIR, exist_ok=True)
         model.save_pretrained(CACHED_DIR)
         proc.save_pretrained(CACHED_DIR)
@@ -1127,7 +1256,7 @@ def load_bark_clean():
     return model, proc
 
 
-def transcribe_audio(model, proc, wav_path: str) -> str:
+def transcribe_audio(np, sf, torch, model, proc, wav_path: str) -> str:
     wave_arr, sr = sf.read(wav_path, dtype="float32", always_2d=True)
     mono = wave_arr.mean(1)
     if len(mono) == 0:
@@ -1152,7 +1281,12 @@ def transcribe_audio(model, proc, wav_path: str) -> str:
 
 def main() -> None:
     try:
-        model, proc = load_bark_clean()
+        import numpy as np
+        import soundfile as sf
+        import torch
+
+        torch.set_num_threads(max(2, min(6, os.cpu_count() or 4)))
+        model, proc = load_bark_clean(np, torch)
         emit({"type": "ready"})
     except Exception as e:
         emit({"type": "error", "error": f"Failed to load Bark 3.0 Clean: {e}"})
@@ -1174,7 +1308,7 @@ def main() -> None:
             req_id = req.get("req_id", 0)
             t0 = time.perf_counter()
             try:
-                text = transcribe_audio(model, proc, wav_path)
+                text = transcribe_audio(np, sf, torch, model, proc, wav_path)
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 emit({"type": "result", "req_id": req_id, "ok": True, "text": text, "ms": round(elapsed_ms, 1)})
             except Exception as e:
@@ -1198,10 +1332,49 @@ def get_bark_runtime_python() -> str:
     return os.path.join(get_bark_dir(), "runtime", "python.exe")
 
 
+def _download_file(
+    url: str,
+    dst_path: str,
+    status_cb: Callable[[str], None] | None = None,
+    label: str = "",
+) -> None:
+    """Download *url* to *dst_path* with a 30s socket timeout, retry backoff, and optional progress callback."""
+    tmp_path = dst_path + ".part"
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Audify-Installer/2.9"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                last_pct = -10
+                with open(tmp_path, "wb") as out_f:
+                    while True:
+                        chunk = resp.read(128 * 1024)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+                        downloaded += len(chunk)
+                        if status_cb and label and total > 0:
+                            pct = min(100, int((downloaded * 100) / total))
+                            if pct - last_pct >= 10 or pct == 100:
+                                last_pct = pct
+                                status_cb(f"{label} ({pct}%)...")
+            os.replace(tmp_path, dst_path)
+            return
+        except Exception as e:
+            last_err = e
+            time.sleep(0.8 * (attempt + 1))
+    raise RuntimeError(f"Download failed ({url}): {last_err}")
+
+
 def find_bark_python() -> str | None:
-    """Locate a Python interpreter on the machine with ParakeetForTDT support."""
+    """Locate a Python interpreter on the machine with complete Bark 3.0 Clean package support."""
+    runtime_py = get_bark_runtime_python()
     candidates: list[str] = [
-        get_bark_runtime_python(),
+        runtime_py,
         r"C:\Python314\python.exe",
         shutil.which("python") or "",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python314\python.exe"),
@@ -1213,7 +1386,17 @@ def find_bark_python() -> str | None:
         candidates.append(sys.executable)
 
     appdata = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    runtime_norm = os.path.normcase(os.path.abspath(runtime_py))
     seen: set[str] = set()
+    required_pkgs = (
+        "torch",
+        "constriction",
+        "soxr",
+        "safetensors",
+        "huggingface_hub",
+        "numpy",
+    )
+
     for exe in candidates:
         if not exe:
             continue
@@ -1221,19 +1404,34 @@ def find_bark_python() -> str | None:
         if norm in seen or not os.path.isfile(exe):
             continue
         seen.add(norm)
-        # Fast 0.2ms filesystem check in both system and user (%APPDATA%) site-packages
         exe_dir = os.path.dirname(os.path.abspath(exe))
+
+        # For the embedded Python runtime, ensure VC++ runtime DLLs from msvc-runtime are present
+        if norm == runtime_norm:
+            if not os.path.isfile(os.path.join(exe_dir, "msvcp140.dll")):
+                continue
+
         py_tag = os.path.basename(exe_dir)  # e.g. "Python314"
         site_roots = [
             os.path.join(appdata, "Python", py_tag, "site-packages"),
             os.path.join(exe_dir, "Lib", "site-packages"),
             os.path.join(os.path.dirname(exe_dir), "Lib", "site-packages"),
         ]
-        has_torch = False
+        found_pkgs: set[str] = set()
+        has_soundfile = False
         has_parakeet_tdt = False
         for sp in site_roots:
-            if os.path.isdir(os.path.join(sp, "torch")):
-                has_torch = True
+            if not os.path.isdir(sp):
+                continue
+            for pkg in required_pkgs:
+                if os.path.isdir(os.path.join(sp, pkg)):
+                    found_pkgs.add(pkg)
+            if (
+                os.path.isfile(os.path.join(sp, "soundfile.py"))
+                or os.path.isdir(os.path.join(sp, "soundfile"))
+                or os.path.isdir(os.path.join(sp, "_soundfile_data"))
+            ):
+                has_soundfile = True
             modeling_py = os.path.join(
                 sp, "transformers", "models", "parakeet", "modeling_parakeet.py"
             )
@@ -1244,9 +1442,35 @@ def find_bark_python() -> str | None:
                             has_parakeet_tdt = True
                 except Exception:
                     pass
-        if has_torch and has_parakeet_tdt:
+        if (
+            has_parakeet_tdt
+            and has_soundfile
+            and all(p in found_pkgs for p in required_pkgs)
+        ):
             return exe
     return None
+
+
+def _ensure_pth_configured(rt_dir: str) -> None:
+    """Ensure python312._pth enables `import site`, `.`, and `Lib\\site-packages`."""
+    pth_file = os.path.join(rt_dir, "python312._pth")
+    if not os.path.isfile(pth_file):
+        return
+    try:
+        with open(pth_file, "r", encoding="utf-8") as f:
+            pth_txt = f.read()
+        updated = pth_txt.replace("#import site", "import site")
+        lines = [ln.strip() for ln in updated.splitlines() if ln.strip()]
+        if "." not in lines:
+            lines.insert(1 if lines else 0, ".")
+        if "Lib\\site-packages" not in lines:
+            lines.append("Lib\\site-packages")
+        if "import site" not in lines:
+            lines.append("import site")
+        with open(pth_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
 
 
 def bootstrap_bark_python(
@@ -1270,9 +1494,14 @@ def bootstrap_bark_python(
         try:
             if not os.path.isfile(py_exe):
                 if status_cb:
-                    status_cb("Downloading portable Python runtime (11 MB)...")
+                    status_cb("Downloading Python runtime (0%)...")
                 zip_path = os.path.join(rt_dir, "python_embed.zip")
-                urllib.request.urlretrieve(PYTHON_EMBED_URL, zip_path)
+                _download_file(
+                    PYTHON_EMBED_URL,
+                    zip_path,
+                    status_cb=status_cb,
+                    label="Downloading Python runtime",
+                )
                 with zipfile.ZipFile(zip_path, "r") as zf:
                     zf.extractall(rt_dir)
                 try:
@@ -1280,33 +1509,25 @@ def bootstrap_bark_python(
                 except Exception:
                     pass
 
-                # Enable site-packages in python312._pth
-                pth_file = os.path.join(rt_dir, "python312._pth")
-                if os.path.isfile(pth_file):
-                    with open(pth_file, "r", encoding="utf-8") as f:
-                        pth_txt = f.read()
-                    pth_txt = pth_txt.replace("#import site", "import site")
-                    if "Lib\\site-packages" not in pth_txt:
-                        pth_txt = pth_txt.rstrip() + "\nLib\\site-packages\n"
-                    with open(pth_file, "w", encoding="utf-8") as f:
-                        f.write(pth_txt)
+            _ensure_pth_configured(rt_dir)
 
             pip_exe = os.path.join(rt_dir, "Scripts", "pip.exe")
             if not os.path.isfile(pip_exe):
                 if status_cb:
                     status_cb("Configuring Python package manager...")
                 get_pip_py = os.path.join(rt_dir, "get-pip.py")
-                urllib.request.urlretrieve(GET_PIP_URL, get_pip_py)
+                _download_file(GET_PIP_URL, get_pip_py)
                 subprocess.run(
                     [py_exe, get_pip_py, "--no-warn-script-location"],
                     check=True,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     creationflags=CREATE_NO_WINDOW,
                 )
 
             if status_cb:
-                status_cb("Installing Bark 3.0 CPU engine (first-time setup)...")
+                status_cb("Installing Bark 3.0 CPU engine (step 1/2)...")
             subprocess.run(
                 [
                     py_exe,
@@ -1314,17 +1535,21 @@ def bootstrap_bark_python(
                     "pip",
                     "install",
                     "--no-warn-script-location",
+                    "msvc-runtime",
                     "torch",
                     "--index-url",
                     "https://download.pytorch.org/whl/cpu",
+                    "--extra-index-url",
+                    "https://pypi.org/simple",
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
                 creationflags=CREATE_NO_WINDOW,
             )
             if status_cb:
-                status_cb("Installing Bark 3.0 audio & transformer libraries...")
+                status_cb("Installing Bark 3.0 audio libraries (step 2/2)...")
             subprocess.run(
                 [
                     py_exe,
@@ -1332,6 +1557,7 @@ def bootstrap_bark_python(
                     "pip",
                     "install",
                     "--no-warn-script-location",
+                    "msvc-runtime",
                     "transformers>=5.5.0",
                     "constriction",
                     "soundfile",
@@ -1342,9 +1568,15 @@ def bootstrap_bark_python(
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
                 creationflags=CREATE_NO_WINDOW,
             )
+        except subprocess.CalledProcessError as e:
+            err_tail = (e.stderr or str(e)).strip().splitlines()[-1:]
+            detail = err_tail[0] if err_tail else str(e)
+            print(f"[WARN] Bark 3.0 Clean runtime bootstrap failed: {detail}")
+            return None
         except Exception as e:
             print(f"[WARN] Bark 3.0 Clean runtime bootstrap failed: {e}")
             return None
@@ -1364,6 +1596,7 @@ class BarkCleanController:
         self.hud = DictationVisualizerHUD(self)
         self.last_dictated: str = ""
         self._lock = threading.Lock()
+        self._spawn_lock = threading.Lock()
         self._transcribing = False
         self._cancel_seq: int = 0
         self._active_req_id: int = 0
@@ -1379,14 +1612,26 @@ class BarkCleanController:
         self._last_result: dict | None = None
         self._idle_timer: threading.Timer | None = None
 
-        # Silently pre-warm the Bark 3.0 Clean worker 3s after daemon startup
-        # if the runtime is already installed, so first dictation transcribes in ~2s.
+        # Silently initialize or pre-warm the Bark 3.0 Clean worker 3s after daemon startup
+        # so on a clean PC the runtime + model download begins immediately in the background.
         if self.daemon is not None:
-            prewarm = threading.Timer(
-                3.0, lambda: self._ensure_worker_started(allow_bootstrap=False)
-            )
+            prewarm = threading.Timer(3.0, self._background_startup_init)
             prewarm.daemon = True
             prewarm.start()
+
+    def _background_startup_init(self) -> None:
+        """Silently warm or bootstrap Bark 3.0 Clean in the background after launch."""
+        try:
+            self._ensure_worker_started(allow_bootstrap=True)
+        except Exception:
+            pass
+        finally:
+            if (
+                self.daemon is not None
+                and not self.daemon.is_speaking
+                and not self.is_busy
+            ):
+                self.daemon._set_status("Ready", speaking=False)
 
     @property
     def is_recording(self) -> bool:
@@ -1431,6 +1676,7 @@ class BarkCleanController:
         """Immediately cancel an in-progress microphone recording or transcription without pasting."""
         was_recording = self.recorder.is_recording
         if not was_recording and not self._transcribing:
+            self.hud.hide()
             return False
 
         if was_recording:
@@ -1485,12 +1731,13 @@ class BarkCleanController:
                 auto_stop_on_silence=True,
                 silence_delay_s=silence_delay_s,
             )
+            self.hud.clear_status()
             self.hud.show()
             if self.daemon is not None:
                 self.daemon._set_status("Listening...", speaking=False)
-            # Ensure the Bark 3.0 Clean worker is warm while the user speaks
+            # Pre-warm the worker while the user speaks without blocking self._lock
             threading.Thread(
-                target=self._ensure_worker_started,
+                target=lambda: self._ensure_worker_started(allow_bootstrap=True),
                 daemon=True,
                 name="bark-prewarm",
             ).start()
@@ -1548,6 +1795,7 @@ class BarkCleanController:
             wav_path: str | None = None
             ok = False
             out_msg = ""
+            show_hud_err = False
             try:
                 fd, wav_path = tempfile.mkstemp(
                     prefix="audify_dictation_", suffix=".wav"
@@ -1568,10 +1816,13 @@ class BarkCleanController:
                 elif ok and not out_msg:
                     out_msg = "No speech detected."
                     ok = False
+                elif not ok and out_msg and out_msg != "Dictation cancelled.":
+                    show_hud_err = True
             except Exception as e:
                 if self._cancel_seq == my_seq:
                     ok = False
                     out_msg = f"Transcription failed: {e}"
+                    show_hud_err = True
                     if self.daemon is not None:
                         self.daemon._notify_error(out_msg)
             finally:
@@ -1582,7 +1833,10 @@ class BarkCleanController:
                         pass
                 if self._cancel_seq == my_seq:
                     self._transcribing = False
-                    self.hud.hide()
+                    if show_hud_err and out_msg:
+                        self.hud.show_error(out_msg, duration_s=3.4)
+                    else:
+                        self.hud.hide()
                     if self.daemon is not None:
                         try:
                             self.daemon._clip_listener.set_recording_escape_guard(False)
@@ -1605,7 +1859,7 @@ class BarkCleanController:
         self, wav_path: str, cancel_seq: int | None = None
     ) -> tuple[bool, str]:
         """Send *wav_path* to the Bark 3.0 Clean worker and return ``(ok, text_or_error)``."""
-        if not self._ensure_worker_started():
+        if not self._ensure_worker_started(allow_bootstrap=True, cancel_seq=cancel_seq):
             if cancel_seq is not None and self._cancel_seq != cancel_seq:
                 return False, "Dictation cancelled."
             err = self._proc_error or "Could not start Bark 3.0 Clean Python runtime."
@@ -1615,6 +1869,10 @@ class BarkCleanController:
 
         if cancel_seq is not None and self._cancel_seq != cancel_seq:
             return False, "Dictation cancelled."
+
+        self.hud.clear_status()
+        if self.daemon is not None and self._transcribing:
+            self.daemon._set_status("Transcribing...", speaking=False)
 
         with self._lock:
             if cancel_seq is not None and self._cancel_seq != cancel_seq:
@@ -1698,21 +1956,38 @@ class BarkCleanController:
         ).start()
         return True
 
-    def _ensure_worker_started(self, allow_bootstrap: bool = True) -> bool:
-        """Spawn the Bark 3.0 Clean sidecar subprocess if not already running."""
-        with self._lock:
+    def _report_setup_status(self, msg: str) -> None:
+        """Update both the HUD pill status text (when transcribing) and daemon status."""
+        if not msg:
+            return
+        if self._transcribing or self.recorder.is_recording:
+            self.hud.set_status(msg)
+        if self.daemon is not None and not self.daemon.is_speaking:
+            self.daemon._set_status(msg, speaking=False)
+
+    def _ensure_worker_started(
+        self, allow_bootstrap: bool = True, cancel_seq: int | None = None
+    ) -> bool:
+        """Spawn the Bark 3.0 Clean sidecar subprocess if not already running.
+
+        Uses ``self._spawn_lock`` rather than ``self._lock`` so first-time runtime
+        bootstrap or model downloads never block ``stop_and_transcribe`` or ``cancel_dictation``.
+        """
+        with self._spawn_lock:
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False
+
             if self._proc is None or self._proc.poll() is not None:
                 py_exe = find_bark_python()
                 if not py_exe and allow_bootstrap:
-                    def _on_boot_status(msg: str) -> None:
-                        if self.daemon is not None:
-                            self.daemon._set_status(msg, speaking=False)
-
-                    py_exe = bootstrap_bark_python(status_cb=_on_boot_status)
+                    py_exe = bootstrap_bark_python(status_cb=self._report_setup_status)
                 if not py_exe:
                     self._proc_error = (
                         "Could not initialize Bark 3.0 Clean Python runtime."
                     )
+                    return False
+
+                if cancel_seq is not None and self._cancel_seq != cancel_seq:
                     return False
 
                 bark_dir = get_bark_dir()
@@ -1722,31 +1997,62 @@ class BarkCleanController:
 
                 self._proc_ready.clear()
                 self._proc_error = None
-                self._proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     [py_exe, "-u", worker_script, bark_dir],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     creationflags=CREATE_NO_WINDOW,
                 )
+                with self._lock:
+                    self._proc = proc
                 threading.Thread(
                     target=self._stdout_reader,
-                    args=(self._proc,),
+                    args=(proc,),
                     daemon=True,
                     name="bark-worker-stdout",
                 ).start()
+                threading.Thread(
+                    target=self._stderr_reader,
+                    args=(proc,),
+                    daemon=True,
+                    name="bark-worker-stderr",
+                ).start()
 
-        # Wait up to 360s on first run (in case model.bark is downloading/unpacking)
-        if not self._proc_ready.wait(timeout=360.0):
-            self._proc_error = "Timed out initializing Bark 3.0 Clean."
-            self.shutdown()
-            return False
+        # Poll in 0.15s intervals so pressing Escape cancels immediately even while downloading/loading
+        deadline = time.monotonic() + 600.0
+        while not self._proc_ready.wait(timeout=0.15):
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False
+            if time.monotonic() >= deadline:
+                self._proc_error = "Timed out initializing Bark 3.0 Clean."
+                self.shutdown()
+                return False
 
+        self.hud.clear_status()
         self._reset_idle_timer()
         return self._proc_error is None
+
+    def _stderr_reader(self, proc: subprocess.Popen) -> None:
+        """Capture stderr from the sidecar worker so crashes report a clear error message."""
+        if proc.stderr is None:
+            return
+        lines: list[str] = []
+        try:
+            for line in proc.stderr:
+                s = line.strip()
+                if s:
+                    lines.append(s)
+                    if len(lines) > 15:
+                        lines.pop(0)
+        except Exception:
+            pass
+        if self._proc is proc and not self._proc_ready.is_set() and lines:
+            self._proc_error = f"Bark 3.0 worker error: {lines[-1]}"
+            self._proc_ready.set()
 
     def _stdout_reader(self, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
@@ -1763,15 +2069,13 @@ class BarkCleanController:
             mtype = msg.get("type")
             if mtype == "status":
                 status_str = str(msg.get("status", ""))
-                if (
-                    status_str
-                    and self.daemon is not None
-                    and self._transcribing
-                ):
-                    self.daemon._set_status(status_str, speaking=False)
+                if status_str:
+                    self._report_setup_status(status_str)
             elif mtype == "ready":
+                self.hud.clear_status()
                 self._proc_ready.set()
             elif mtype == "error":
+                self.hud.clear_status()
                 self._proc_error = str(msg.get("error", "Worker error"))
                 self._proc_ready.set()
             elif mtype == "result":
@@ -1783,9 +2087,11 @@ class BarkCleanController:
 
         if self._proc is not proc:
             return
+        self.hud.clear_status()
         # If process exited before signaling ready, unblock waiters
         if not self._proc_ready.is_set():
-            self._proc_error = "Worker exited unexpectedly."
+            if not self._proc_error:
+                self._proc_error = "Worker exited unexpectedly."
             self._proc_ready.set()
         if not self._result_event.is_set():
             self._last_result = {"ok": False, "error": "Worker exited during transcription."}

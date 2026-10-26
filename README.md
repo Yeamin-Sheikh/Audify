@@ -202,6 +202,14 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.16
+
+- **Fixed Clean-PC First-Run Bark 3.0 Model Bootstrap & Stuck Pill Bug**:
+  - Added a built-in pure-NumPy Slaney mel filterbank shim (`_install_librosa_shim` in `audify/stt.py`) so `ParakeetFeatureExtractor` in `transformers` no longer fails with `ImportError: ParakeetFeatureExtractor requires the librosa library` on machines without `librosa` installed.
+  - Added `msvc-runtime` (`msvcp140.dll`, `vcomp140.dll`, `concrt140.dll`) and `os.add_dll_directory` to the portable Python 3.12 runtime bootstrap so PyTorch CPU loads cleanly on fresh Windows machines without VC++ Redistributable pre-installed.
+  - Separated `_spawn_lock` from `_lock` in `BarkCleanController` (`audify/stt.py`) so background runtime/model setup never blocks `stop_and_transcribe` or `cancel_dictation` or leaves the floating HUD pill stuck on screen.
+  - Added live percentage progress (`Downloading Bark 3.0 model (XX%)...`, `Unpacking Bark 3.0 Clean weights...`) and auto-hiding error banners inside `DictationVisualizerHUD` (`audify/gui/stt_hud.py`).
+
 ### v2.9.15
 
 - **Cancel Dictation or Transcription with Escape**: pressing `Escape` while dictating or while Bark 3.0 Clean is transcribing now immediately cancels the operation (`BarkCleanController.cancel_dictation` in `audify/stt.py`), discards the recording/result without pasting anything, hides the floating visualizer pill, and keeps your active input field focused.

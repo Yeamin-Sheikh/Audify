@@ -88,6 +88,8 @@ class DictationVisualizerHUD:
         self._lock = threading.Lock()
         self._started = False
         self._visible_requested = False
+        self._visible_since: float = 0.0
+        self._status_text: str = ""
         self._toast_text: str = ""
         self._toast_until: float = 0.0
 
@@ -103,12 +105,48 @@ class DictationVisualizerHUD:
 
     def show(self) -> None:
         """Request the visualizer HUD to appear (spawning its thread on first use)."""
-        self._visible_requested = True
+        with self._lock:
+            self._visible_requested = True
+            self._visible_since = time.monotonic()
         self._ensure_thread_started()
 
     def hide(self) -> None:
-        """Request the visualizer HUD to hide."""
-        self._visible_requested = False
+        """Request the visualizer HUD to hide and clear any setup status banner."""
+        with self._lock:
+            self._visible_requested = False
+            self._status_text = ""
+
+    def set_status(self, text: str) -> None:
+        """Display a live setup or download progress message inside the pill."""
+        clean = (text or "").strip()
+        if len(clean) > 54:
+            clean = clean[:52] + "…"
+        with self._lock:
+            self._status_text = clean
+            if clean:
+                self._visible_since = time.monotonic()
+        if clean:
+            self._ensure_thread_started()
+
+    def clear_status(self) -> None:
+        """Clear the setup/download status message and return to the equalizer bars."""
+        with self._lock:
+            self._status_text = ""
+
+    def show_error(self, message: str, duration_s: float = 3.4) -> None:
+        """Show a brief non-obstructive error notice in the pill and auto-hide afterward."""
+        clean = (message or "").strip()
+        if not clean:
+            self.hide()
+            return
+        if len(clean) > 54:
+            clean = clean[:52] + "…"
+        with self._lock:
+            self._visible_requested = False
+            self._status_text = ""
+            self._toast_text = f"⚠  {clean}"
+            self._toast_until = time.monotonic() + float(duration_s)
+        self._ensure_thread_started()
 
     def show_learned(self, heard: str, written: str, duration_s: float = 2.4) -> None:
         """Show a minimal non-obstructive confirmation in the pill when a word fix is learned."""
@@ -285,15 +323,28 @@ class DictationVisualizerHUD:
         def _tick() -> None:
             rec = self.stt.is_recording
             trans = self.stt.is_transcribing
+            now_mono = time.monotonic()
             with self._lock:
+                if (
+                    self._visible_requested
+                    and not rec
+                    and not trans
+                    and not self._status_text
+                    and (now_mono - self._visible_since) > 1.2
+                ):
+                    self._visible_requested = False
+                vis_req = self._visible_requested
+                s_text = self._status_text
                 t_text = self._toast_text
                 t_until = self._toast_until
+
+            status_active = bool(s_text) and (vis_req or rec or trans)
             toast_active = (
-                (not rec and not trans)
+                (not rec and not trans and not status_active)
                 and bool(t_text)
-                and (time.monotonic() < t_until)
+                and (now_mono < t_until)
             )
-            should_show = self._visible_requested or rec or trans or toast_active
+            should_show = vis_req or rec or trans or status_active or toast_active
 
             if not should_show:
                 if is_shown[0]:
@@ -314,7 +365,8 @@ class DictationVisualizerHUD:
                     pass
             canvas.itemconfig(pill_id, fill=pal_now["pill_bg"], outline="")
 
-            if toast_active and not (rec or trans):
+            banner_text = s_text if (status_active and not rec) else (t_text if toast_active else "")
+            if banner_text:
                 if not in_toast_layout[0]:
                     in_toast_layout[0] = True
                     canvas.itemconfig(dot_id, state="hidden")
@@ -323,7 +375,7 @@ class DictationVisualizerHUD:
                     canvas.itemconfig(toast_text_id, state="normal")
 
                 canvas.itemconfig(
-                    toast_text_id, text=t_text, fill=pal_now["pill_bar_active"]
+                    toast_text_id, text=banner_text, fill=pal_now["pill_bar_active"]
                 )
                 bbox = canvas.bbox(toast_text_id)
                 text_px = (bbox[2] - bbox[0]) if bbox else S(140)
@@ -355,7 +407,7 @@ class DictationVisualizerHUD:
                 except Exception:
                     root.deiconify()
 
-            if toast_active and not (rec or trans):
+            if banner_text:
                 root.after(60, _tick)
                 return
 
