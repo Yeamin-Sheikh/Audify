@@ -176,6 +176,7 @@ class Win32MicRecorder:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._recording = False
+        self._cancelled = False
         self._thread: threading.Thread | None = None
         self._frames: list[bytes] = []
         self._trim_start_idx: int = 0
@@ -206,11 +207,21 @@ class Win32MicRecorder:
         with self._lock:
             if self._recording:
                 return
+            lingering_thread = self._thread
+            self._thread = None
+
+        if lingering_thread is not None and lingering_thread is not threading.current_thread():
+            lingering_thread.join(timeout=1.5)
+
+        with self._lock:
+            if self._recording:
+                return
             if _winmm.waveInGetNumDevs() == 0:
                 raise RuntimeError("No microphone input device found on this system.")
             self._frames = []
             self._trim_start_idx = 0
             self._trim_end_idx = None
+            self._cancelled = False
             self._recording = True
             self.current_level = 0.0
             self.level_bars = [0.08] * 9
@@ -242,6 +253,9 @@ class Win32MicRecorder:
             thread.join(timeout=3.0)
 
         with self._lock:
+            if self._cancelled:
+                self._frames = []
+                return 0.0
             frames = self._frames
             start_idx = self._trim_start_idx
             end_idx = self._trim_end_idx
@@ -264,6 +278,22 @@ class Win32MicRecorder:
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(pcm_data)
         return duration_s
+
+    def cancel(self, wait: bool = False) -> None:
+        """Abort microphone recording immediately and discard captured audio frames."""
+        with self._lock:
+            self._recording = False
+            self._cancelled = True
+            self._auto_stop_cb = None
+            self._frames = []
+            self._trim_start_idx = 0
+            self._trim_end_idx = None
+            thread = self._thread if wait else None
+            if wait:
+                self._thread = None
+
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
 
     def _record_loop(
         self,
@@ -400,8 +430,8 @@ class Win32MicRecorder:
             _winmm.waveInStop(h_wave_in)
             _winmm.waveInReset(h_wave_in)
 
-            # Drain any partial buffer flushed by waveInReset (only if manually stopped)
-            if auto_stop_reason is None:
+            # Drain any partial buffer flushed by waveInReset (only if manually stopped and not cancelled)
+            if auto_stop_reason is None and not self._cancelled:
                 for i in range(NUM_BUFFERS):
                     recorded = headers[i].dwBytesRecorded
                     if recorded > 0:
@@ -1141,13 +1171,14 @@ def main() -> None:
             break
         if cmd == "transcribe":
             wav_path = req.get("wav_path", "")
+            req_id = req.get("req_id", 0)
             t0 = time.perf_counter()
             try:
                 text = transcribe_audio(model, proc, wav_path)
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                emit({"type": "result", "ok": True, "text": text, "ms": round(elapsed_ms, 1)})
+                emit({"type": "result", "req_id": req_id, "ok": True, "text": text, "ms": round(elapsed_ms, 1)})
             except Exception as e:
-                emit({"type": "result", "ok": False, "error": str(e)})
+                emit({"type": "result", "req_id": req_id, "ok": False, "error": str(e)})
 
 
 if __name__ == "__main__":
@@ -1334,6 +1365,8 @@ class BarkCleanController:
         self.last_dictated: str = ""
         self._lock = threading.Lock()
         self._transcribing = False
+        self._cancel_seq: int = 0
+        self._active_req_id: int = 0
         self._last_toggle_time = 0.0
         self._last_paste_time = 0.0
         self._on_complete_cb: Callable[[bool, str], None] | None = None
@@ -1390,9 +1423,43 @@ class BarkCleanController:
             return "transcribing"
 
     def on_escape_pressed(self) -> None:
-        """Called when Escape is intercepted during active dictation (prevents browser blur)."""
-        if self.recorder.is_recording and not self._transcribing:
-            self.stop_and_transcribe()
+        """Called when Escape is pressed during active dictation or transcription to cancel it."""
+        if self.recorder.is_recording or self._transcribing:
+            self.cancel_dictation()
+
+    def cancel_dictation(self) -> bool:
+        """Immediately cancel an in-progress microphone recording or transcription without pasting."""
+        was_recording = self.recorder.is_recording
+        if not was_recording and not self._transcribing:
+            return False
+
+        if was_recording:
+            self.recorder.cancel(wait=False)
+
+        with self._lock:
+            self._cancel_seq += 1
+            self._active_req_id += 1
+            self._transcribing = False
+            self._last_result = {"ok": False, "cancelled": True, "error": "Dictation cancelled."}
+            self._result_event.set()
+            cb = self._on_complete_cb
+            self._on_complete_cb = None
+
+        self.hud.hide()
+        if self.daemon is not None:
+            try:
+                self.daemon._clip_listener.set_recording_escape_guard(False)
+            except Exception:
+                pass
+            self.daemon._set_status("Ready", speaking=False)
+
+        if cb is not None:
+            try:
+                cb(False, "Dictation cancelled.")
+            except Exception:
+                pass
+        print("[STT] Dictation/transcription cancelled via Escape.")
+        return True
 
     def start_dictation(
         self, on_complete: Callable[[bool, str], None] | None = None
@@ -1469,7 +1536,9 @@ class BarkCleanController:
         """Stop microphone recording, run Bark 3.0 Clean, and paste the cleaned text."""
         if (not self.recorder.is_recording and not _from_vad) or self._transcribing:
             return
-        self._transcribing = True
+        with self._lock:
+            my_seq = self._cancel_seq
+            self._transcribing = True
         if on_complete is not None:
             self._on_complete_cb = on_complete
         if self.daemon is not None:
@@ -1485,71 +1554,98 @@ class BarkCleanController:
                 )
                 os.close(fd)
                 duration_s = self.recorder.stop_and_save(wav_path)
+                if self._cancel_seq != my_seq:
+                    return
                 if duration_s < 0.25:
                     out_msg = "Recording too short."
                     return
 
-                ok, out_msg = self.transcribe_file(wav_path)
+                ok, out_msg = self.transcribe_file(wav_path, cancel_seq=my_seq)
+                if self._cancel_seq != my_seq:
+                    return
                 if ok and out_msg:
                     self._copy_and_paste(out_msg)
                 elif ok and not out_msg:
                     out_msg = "No speech detected."
                     ok = False
             except Exception as e:
-                ok = False
-                out_msg = f"Transcription failed: {e}"
-                if self.daemon is not None:
-                    self.daemon._notify_error(out_msg)
+                if self._cancel_seq == my_seq:
+                    ok = False
+                    out_msg = f"Transcription failed: {e}"
+                    if self.daemon is not None:
+                        self.daemon._notify_error(out_msg)
             finally:
                 if wav_path:
                     try:
                         os.remove(wav_path)
                     except Exception:
                         pass
-                self._transcribing = False
-                self.hud.hide()
-                if self.daemon is not None:
-                    try:
-                        self.daemon._clip_listener.set_recording_escape_guard(False)
-                    except Exception:
-                        pass
-                    self.daemon._set_status("Ready", speaking=False)
-                cb = self._on_complete_cb
-                self._on_complete_cb = None
-                if cb is not None:
-                    try:
-                        cb(ok, out_msg)
-                    except Exception:
-                        pass
+                if self._cancel_seq == my_seq:
+                    self._transcribing = False
+                    self.hud.hide()
+                    if self.daemon is not None:
+                        try:
+                            self.daemon._clip_listener.set_recording_escape_guard(False)
+                        except Exception:
+                            pass
+                        self.daemon._set_status("Ready", speaking=False)
+                    cb = self._on_complete_cb
+                    self._on_complete_cb = None
+                    if cb is not None:
+                        try:
+                            cb(ok, out_msg)
+                        except Exception:
+                            pass
 
         threading.Thread(
             target=_worker, daemon=True, name="bark-transcribe"
         ).start()
 
-    def transcribe_file(self, wav_path: str) -> tuple[bool, str]:
+    def transcribe_file(
+        self, wav_path: str, cancel_seq: int | None = None
+    ) -> tuple[bool, str]:
         """Send *wav_path* to the Bark 3.0 Clean worker and return ``(ok, text_or_error)``."""
         if not self._ensure_worker_started():
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False, "Dictation cancelled."
             err = self._proc_error or "Could not start Bark 3.0 Clean Python runtime."
             if self.daemon is not None:
                 self.daemon._notify_error(err)
             return False, err
 
+        if cancel_seq is not None and self._cancel_seq != cancel_seq:
+            return False, "Dictation cancelled."
+
         with self._lock:
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False, "Dictation cancelled."
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None:
                 return False, "Bark 3.0 Clean worker terminated unexpectedly."
 
+            self._active_req_id += 1
+            req_id = self._active_req_id
             self._result_event.clear()
             self._last_result = None
-            payload = json.dumps({"cmd": "transcribe", "wav_path": wav_path}) + "\n"
+            payload = (
+                json.dumps(
+                    {"cmd": "transcribe", "wav_path": wav_path, "req_id": req_id}
+                )
+                + "\n"
+            )
             proc.stdin.write(payload)
             proc.stdin.flush()
 
         if not self._result_event.wait(timeout=120.0):
             return False, "Bark 3.0 Clean transcription timed out."
 
+        if cancel_seq is not None and self._cancel_seq != cancel_seq:
+            return False, "Dictation cancelled."
+
         self._reset_idle_timer()
         res = self._last_result or {}
+        if res.get("cancelled"):
+            return False, "Dictation cancelled."
         if res.get("ok"):
             raw_text = str(res.get("text", "")).strip()
             if raw_text and self.daemon is not None:
@@ -1679,8 +1775,11 @@ class BarkCleanController:
                 self._proc_error = str(msg.get("error", "Worker error"))
                 self._proc_ready.set()
             elif mtype == "result":
-                self._last_result = msg
-                self._result_event.set()
+                with self._lock:
+                    msg_req_id = msg.get("req_id")
+                    if msg_req_id is None or msg_req_id == self._active_req_id:
+                        self._last_result = msg
+                        self._result_event.set()
 
         if self._proc is not proc:
             return

@@ -13,6 +13,22 @@
 
 ## Progress log
 
+### 2026-10-26, v2.9.15 Cancel dictation or transcription with Escape
+
+**Duration:** ~3m
+**Status:** Done
+
+#### What changed
+- Added `Win32MicRecorder.cancel()` and `BarkCleanController.cancel_dictation()` in `audify/stt.py` with request-ID tracking (`req_id`) so pressing `Escape` during either microphone recording or Bark 3.0 Clean transcription immediately aborts the operation, discards any pending result without pasting, hides the floating HUD pill, and preserves browser input focus.
+- Wired `VK_ESCAPE` (`0x1B`) in `audify/engine.py` (`_poll_input_state_loop` and `_on_key_press`) alongside `HOTKEY_ID_ACTIVE_ESC` (`audify/clipboard.py`) so `Escape` cancellation also works when elevated windows are focused.
+- Bumped version to `2.9.15`.
+
+#### Files touched
+- `audify/stt.py`, `audify/engine.py`, added `cancel_dictation()` and Escape cancellation during both recording and transcription.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, bumped version to `2.9.15`.
+
+---
+
 ### 2026-10-26, v2.9.14 Read on Copy (Auto TTS) toggle
 
 **Duration:** ~3m

@@ -373,6 +373,9 @@ class TTSDaemon:
                     self._stop_double_tap.taint()
                     self._paste_last_double_tap.taint()
 
+                if self.stt.is_busy and is_vk_down(0x1B):
+                    self.stt.cancel_dictation()
+
                 if self._stop_double_tap.poll() or self._is_stop_combo_down():
                     self.stop_audio()
 
@@ -411,6 +414,9 @@ class TTSDaemon:
         except Exception:
             pass
         name = (getattr(event, "name", "") or "").lower()
+        if name in ("esc", "escape") and self.stt.is_busy:
+            self.stt.cancel_dictation()
+            return
         self._dictation_double_tap.taint_if_other_key(name)
         self._stop_double_tap.taint_if_other_key(name)
         self._paste_last_double_tap.taint_if_other_key(name)

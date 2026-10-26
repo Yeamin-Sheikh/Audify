@@ -202,6 +202,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.15
+
+- **Cancel Dictation or Transcription with Escape**: pressing `Escape` while dictating or while Bark 3.0 Clean is transcribing now immediately cancels the operation (`BarkCleanController.cancel_dictation` in `audify/stt.py`), discards the recording/result without pasting anything, hides the floating visualizer pill, and keeps your active input field focused.
+
 ### v2.9.14
 
 - **Read on Copy (Auto TTS) Toggle**: added `read_on_copy` (enabled by default) with a **Read on copy** toggle switch in the Settings **Reading** section (`audify/gui/control_center.py`) and a **Read on Copy (Auto TTS)** checkable option in the system tray menu (`audify/tray.py`) so users can disable automatic clipboard reading whenever they want while keeping Speech-to-Text dictation and manual clipboard reading active.
