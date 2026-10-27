@@ -359,6 +359,9 @@ def setup_tray() -> None:
     def on_toggle_read_on_copy(icon: pystray.Icon, item_action: item) -> None:
         daemon.toggle_read_on_copy()
 
+    def on_toggle_stt_enabled(icon: pystray.Icon, item_action: item) -> None:
+        daemon.toggle_stt_enabled()
+
     def on_open_settings(icon: pystray.Icon, item_action: item) -> None:
         threading.Thread(
             target=show_dictionary_ui, args=(daemon,), daemon=True
@@ -499,20 +502,30 @@ def setup_tray() -> None:
             item("Read Clipboard Now", on_read_clipboard),
             item(
                 lambda text: (
-                    f"{'Stop & Transcribe' if daemon.stt.is_recording else ('Transcribing...' if daemon.stt.is_transcribing else 'Start Dictation (Bark 3.0)')}"
-                    f"\t{_dictation_hotkey_display_name(daemon)}"
+                    "Dictation Disabled (Light Mode)\tOff"
+                    if not daemon.config.get("stt_enabled", True)
+                    else (
+                        f"{'Stop & Transcribe' if daemon.stt.is_recording else ('Transcribing...' if daemon.stt.is_transcribing else 'Start Dictation (Bark 3.0)')}"
+                        f"\t{_dictation_hotkey_display_name(daemon)}"
+                    )
                 ),
                 on_toggle_dictation,
-                enabled=lambda i: not daemon.stt.is_transcribing,
+                enabled=lambda i: bool(
+                    daemon.config.get("stt_enabled", True)
+                    and not daemon.stt.is_transcribing
+                ),
             ),
             item(
                 lambda text: f"Paste Last Dictation\t{_paste_last_hotkey_display_name(daemon)}",
                 on_paste_last_dictation,
-                enabled=lambda i: bool(daemon.stt.last_dictated),
+                enabled=lambda i: bool(
+                    daemon.config.get("stt_enabled", True) and daemon.stt.last_dictated
+                ),
             ),
             item(
                 lambda text: f"Dictation Auto-Stop Delay\t{_silence_delay_display_name(daemon)}",
                 Menu(*silence_delay_menu_items),
+                enabled=lambda i: bool(daemon.config.get("stt_enabled", True)),
             ),
             Menu.SEPARATOR,
             # Voice settings with the current value right-aligned
@@ -532,6 +545,11 @@ def setup_tray() -> None:
                 "Read on Copy (Auto TTS)",
                 on_toggle_read_on_copy,
                 checked=lambda i: daemon.config.get("read_on_copy", True),
+            ),
+            item(
+                "Speech-to-Text (Dictation)",
+                on_toggle_stt_enabled,
+                checked=lambda i: daemon.config.get("stt_enabled", True),
             ),
             item(
                 "Skip Code Blocks",

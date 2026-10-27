@@ -202,6 +202,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.17
+
+- **Speech-to-Text Toggle & Super-Light Mode**: added `stt_enabled` (enabled by default) with a **Speech-to-text** toggle switch in the Settings **Dictation & System Tools** section (`audify/gui/control_center.py`) and a **Speech-to-Text (Dictation)** checkable option in the system tray menu (`audify/tray.py`). Turning Speech-to-Text off immediately cancels any active dictation, terminates and unloads the Bark 3.0 Clean Python sidecar process (`BarkCleanController.set_enabled` and `BarkCleanController.shutdown` in `audify/stt.py`), unbinds dictation hotkeys, and trims Audify's process working set so the 400 to 500 MB STT model RAM is completely freed.
+
 ### v2.9.16
 
 - **Fixed Clean-PC First-Run Bark 3.0 Model Bootstrap & Stuck Pill Bug**:

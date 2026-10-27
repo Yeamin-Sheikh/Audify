@@ -201,6 +201,7 @@ DEFAULT_CONFIG: dict = {
     "rate": "+50%",
     "volume": 1.0,
     "read_on_copy": True,
+    "stt_enabled": True,
     "skip_code_blocks": True,
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
@@ -351,6 +352,11 @@ def load_config() -> dict:
         stt_changed = True
     if not isinstance(config.get("read_on_copy"), bool):
         config["read_on_copy"] = True
+        stt_changed = True
+    if not isinstance(config.get("stt_enabled"), bool):
+        config["stt_enabled"] = True
+        stt_changed = True
+    if loaded is not None and ("stt_enabled" not in loaded or "read_on_copy" not in loaded):
         stt_changed = True
     if stt_changed and not changed:
         save_config(config)

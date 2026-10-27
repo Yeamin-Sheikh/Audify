@@ -369,7 +369,7 @@ def _run_settings_window(daemon: Any) -> None:
 
     # Header with title and Appearance (System / Light / Dark) segmented pill
     title_row = tk.Frame(sidebar, bg=pal["card"])
-    title_row.pack(fill=tk.X, pady=(0, S(12)))
+    title_row.pack(fill=tk.X, pady=(0, S(8)))
     card_frames.append(title_row)
 
     title_left = tk.Frame(title_row, bg=pal["card"])
@@ -382,12 +382,12 @@ def _run_settings_window(daemon: Any) -> None:
 
     def section_caption(text: str) -> None:
         ttk.Label(sidebar, text=text.upper(), style="Caption.TLabel").pack(
-            anchor=tk.W, pady=(0, S(8))
+            anchor=tk.W, pady=(0, S(6))
         )
 
     def field_label(text: str) -> None:
         ttk.Label(sidebar, text=text, style="Field.TLabel").pack(
-            anchor=tk.W, pady=(0, S(5))
+            anchor=tk.W, pady=(0, S(4))
         )
 
     def add_divider(parent: tk.Misc, pad_top: int, pad_bot: int) -> None:
@@ -403,7 +403,7 @@ def _run_settings_window(daemon: Any) -> None:
         highlightthickness=1,
         highlightbackground=pal["border"],
     )
-    theme_bar.pack(fill=tk.X, pady=(0, S(14)))
+    theme_bar.pack(fill=tk.X, pady=(0, S(10)))
     theme_btns: dict[str, tk.Label] = {}
 
     def _style_theme_buttons(cur_mode: str, p: dict[str, str]) -> None:
@@ -439,7 +439,7 @@ def _run_settings_window(daemon: Any) -> None:
 
     _style_theme_buttons(cur_theme_mode, pal)
 
-    add_divider(sidebar, 0, S(12))
+    add_divider(sidebar, 0, S(8))
     section_caption("Playback")
 
     # Live Volume Controller
@@ -465,7 +465,7 @@ def _run_settings_window(daemon: Any) -> None:
         width=S(200),
         height=S(24),
     )
-    vol_slider.pack(fill=tk.X, pady=(S(2), S(12)))
+    vol_slider.pack(fill=tk.X, pady=(S(2), S(8)))
 
     def on_volume_change(val: float) -> None:
         daemon.set_volume(float(val) / 100.0)
@@ -490,7 +490,7 @@ def _run_settings_window(daemon: Any) -> None:
         font=("Segoe UI", 10),
         width=10,
     )
-    voice_combo.pack(fill=tk.X, pady=(0, S(12)))
+    voice_combo.pack(fill=tk.X, pady=(0, S(8)))
 
     def on_voice_select(event) -> None:
         daemon.set_voice(VOICES[voice_var.get()])
@@ -515,7 +515,7 @@ def _run_settings_window(daemon: Any) -> None:
         font=("Segoe UI", 10),
         width=10,
     )
-    rate_combo.pack(fill=tk.X, pady=(0, S(14)))
+    rate_combo.pack(fill=tk.X, pady=(0, S(10)))
 
     def on_rate_select(event) -> None:
         daemon.set_rate(RATES[rate_var.get()])
@@ -523,7 +523,7 @@ def _run_settings_window(daemon: Any) -> None:
 
     rate_combo.bind("<<ComboboxSelected>>", on_rate_select)
 
-    add_divider(sidebar, 0, S(10))
+    add_divider(sidebar, 0, S(8))
     section_caption("Reading")
 
     read_copy_var = tk.BooleanVar(value=daemon.config.get("read_on_copy", True))
@@ -533,7 +533,7 @@ def _run_settings_window(daemon: Any) -> None:
         read_copy_var.set(daemon.config.get("read_on_copy", True))
 
     read_copy_row = tk.Frame(sidebar, bg=pal["card"], cursor="hand2")
-    read_copy_row.pack(fill=tk.X, pady=(0, S(8)))
+    read_copy_row.pack(fill=tk.X, pady=(0, S(6)))
     card_frames.append(read_copy_row)
     read_copy_chk = FluentToggle(
         read_copy_row,
@@ -606,8 +606,81 @@ def _run_settings_window(daemon: Any) -> None:
     for w in (skip_row, skip_text, skip_title, skip_desc):
         w.bind("<Button-1>", lambda e: skip_chk._on_click(None))
 
-    add_divider(sidebar, S(12), S(12))
+    add_divider(sidebar, S(8), S(8))
     section_caption("Dictation & System Tools")
+
+    stt_enabled_var = tk.BooleanVar(value=daemon.config.get("stt_enabled", True))
+
+    def _sync_stt_controls_state() -> None:
+        stt_on = bool(daemon.config.get("stt_enabled", True))
+        stt_obj = getattr(daemon, "stt", None)
+        if not stt_on:
+            dictate_btn.config(state="disabled", text="Dictation Disabled (Light Mode)")
+            delay_cb.config(state="disabled")
+        else:
+            delay_cb.config(state="readonly")
+            if stt_obj is not None and stt_obj.is_transcribing:
+                dictate_btn.config(state="disabled", text="Transcribing...")
+            elif stt_obj is not None and stt_obj.is_recording:
+                dictate_btn.config(state="normal", text="Stop & Transcribe")
+            else:
+                dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
+
+    def on_toggle_stt_enabled() -> None:
+        if hasattr(daemon, "toggle_stt_enabled"):
+            daemon.toggle_stt_enabled()
+        else:
+            cur = bool(daemon.config.get("stt_enabled", True))
+            daemon.config["stt_enabled"] = not cur
+            save_config(daemon.config)
+            if hasattr(daemon, "stt"):
+                daemon.stt.set_enabled(not cur)
+        now_on = bool(daemon.config.get("stt_enabled", True))
+        stt_enabled_var.set(now_on)
+        _sync_stt_controls_state()
+        p_now = get_palette(str(daemon.config.get("theme_mode", "system")))
+        tools_status_lbl.config(
+            text=(
+                "Speech-to-text enabled (Bark 3.0 ready)"
+                if now_on
+                else "Speech-to-text unloaded (light mode active)"
+            ),
+            foreground=p_now["success"] if now_on else p_now["text_sec"],
+        )
+
+    stt_row = tk.Frame(sidebar, bg=pal["card"], cursor="hand2")
+    stt_row.pack(fill=tk.X, pady=(0, S(8)))
+    card_frames.append(stt_row)
+    stt_chk = FluentToggle(
+        stt_row,
+        variable=stt_enabled_var,
+        command=on_toggle_stt_enabled,
+        bg=pal["card"],
+        active_color=pal["accent_light"],
+        track_color=pal["card"],
+        border_color=pal["text_muted"],
+        knob_on_color=pal["toggle_knob_on"],
+        knob_off_color=pal["toggle_knob_off"],
+        width=S(40),
+        height=S(20),
+    )
+    stt_chk.pack(side=tk.RIGHT, padx=(S(10), 0))
+    stt_text = tk.Frame(stt_row, bg=pal["card"], cursor="hand2")
+    stt_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    card_frames.append(stt_text)
+    stt_title = ttk.Label(
+        stt_text, text="Speech-to-text", style="Field.TLabel", cursor="hand2"
+    )
+    stt_title.pack(anchor=tk.W)
+    stt_desc = ttk.Label(
+        stt_text,
+        text="Unload model when off (light mode)",
+        style="CardSub.TLabel",
+        cursor="hand2",
+    )
+    stt_desc.pack(anchor=tk.W)
+    for w in (stt_row, stt_text, stt_title, stt_desc):
+        w.bind("<Button-1>", lambda e: stt_chk._on_click(None))
 
     tools_status_lbl = ttk.Label(
         sidebar,
@@ -707,8 +780,10 @@ def _run_settings_window(daemon: Any) -> None:
         def _done(ok: bool, msg: str) -> None:
             def _ui_update() -> None:
                 try:
+                    _sync_stt_controls_state()
+                    if not daemon.config.get("stt_enabled", True):
+                        return
                     p_cur = get_palette(str(daemon.config.get("theme_mode", "system")))
-                    dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
                     preview = msg if len(msg) <= 42 else msg[:39] + "..."
                     tools_status_lbl.config(
                         text=f"Dictated: {preview}" if ok else msg,
@@ -779,6 +854,7 @@ def _run_settings_window(daemon: Any) -> None:
 
     delay_cb.bind("<<ComboboxSelected>>", on_delay_change)
 
+    _sync_stt_controls_state()
     tools_status_lbl.pack(anchor=tk.W)
 
     # Footer: customizable global shortcuts
@@ -1438,6 +1514,7 @@ def _run_settings_window(daemon: Any) -> None:
         vol_slider.apply_palette(new_pal)
         read_copy_chk.apply_palette(new_pal)
         skip_chk.apply_palette(new_pal)
+        stt_chk.apply_palette(new_pal)
 
         search_entry_frame.apply_palette(new_pal, field_bg=new_pal["card"])  # type: ignore[attr-defined]
         word_entry_frame.apply_palette(new_pal, field_bg=new_pal["field"])  # type: ignore[attr-defined]
@@ -1535,6 +1612,10 @@ def _run_settings_window(daemon: Any) -> None:
             if skip_var.get() != cur_skip:
                 skip_var.set(cur_skip)
 
+            cur_stt_enabled = bool(daemon.config.get("stt_enabled", True))
+            if stt_enabled_var.get() != cur_stt_enabled:
+                stt_enabled_var.set(cur_stt_enabled)
+
             cur_delay = float(daemon.config.get("stt_silence_delay", 1.0))
             d_name = next(
                 (n for n, d in STT_SILENCE_DELAYS.items() if abs(d - cur_delay) < 0.05),
@@ -1543,14 +1624,7 @@ def _run_settings_window(daemon: Any) -> None:
             if d_name and delay_var.get() != d_name:
                 delay_var.set(d_name)
 
-            stt = getattr(daemon, "stt", None)
-            if stt is not None:
-                if stt.is_transcribing:
-                    dictate_btn.config(state="disabled", text="Transcribing...")
-                elif stt.is_recording:
-                    dictate_btn.config(state="normal", text="Stop & Transcribe")
-                else:
-                    dictate_btn.config(state="normal", text="Start Dictation (Bark 3.0)")
+            _sync_stt_controls_state()
 
             root.after(1000, sync_gui_values)
         except tk.TclError:

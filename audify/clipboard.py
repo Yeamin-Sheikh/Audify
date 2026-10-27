@@ -439,6 +439,7 @@ class ClipboardListener:
         paste_last_hotkey: str = "ctrl+alt+v",
         on_paste_last_hotkey: Callable[[], None] | None = None,
         on_escape_hotkey: Callable[[], None] | None = None,
+        stt_enabled: bool = True,
     ) -> None:
         self.on_text_change = on_text_change
         self.stop_hotkey = stop_hotkey
@@ -448,6 +449,7 @@ class ClipboardListener:
         self.paste_last_hotkey = paste_last_hotkey
         self.on_paste_last_hotkey = on_paste_last_hotkey
         self.on_escape_hotkey = on_escape_hotkey
+        self.stt_enabled = bool(stt_enabled)
         self._hwnd: int | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -483,6 +485,9 @@ class ClipboardListener:
             if user32.RegisterHotKey(hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
                 self._hotkey_registered = True
 
+        if not self.stt_enabled:
+            return
+
         parsed_dict = parse_win32_hotkey(self.dictation_hotkey)
         if parsed_dict and self.on_dictation_hotkey:
             d_mods, d_vk = parsed_dict
@@ -500,6 +505,7 @@ class ClipboardListener:
         stop_hotkey: str | None = None,
         dictation_hotkey: str | None = None,
         paste_last_hotkey: str | None = None,
+        stt_enabled: bool | None = None,
     ) -> None:
         """Update hotkey strings and re-register them on the Win32 message-pump thread."""
         if stop_hotkey is not None:
@@ -508,6 +514,8 @@ class ClipboardListener:
             self.dictation_hotkey = dictation_hotkey
         if paste_last_hotkey is not None:
             self.paste_last_hotkey = paste_last_hotkey
+        if stt_enabled is not None:
+            self.stt_enabled = bool(stt_enabled)
         if self._hwnd:
             user32.PostMessageW(self._hwnd, WM_APP_REBIND_HOTKEYS, 0, 0)
 

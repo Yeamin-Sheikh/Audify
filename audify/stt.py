@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import gc
 import json
 import os
 import shutil
@@ -887,6 +888,17 @@ class DictationCorrectionLearner:
         else:
             self._cancel_capture()
 
+    def reset(self) -> None:
+        """Cancel any active key capture and clear cached dictation words."""
+        with self._lock:
+            self._cancel_capture_locked()
+            self._last_text = ""
+            self._last_words = []
+            self._last_dictation_time = 0.0
+            self._last_click_time = 0.0
+            self._last_click_pos = (0, 0)
+            self._pending_dblclick_release = False
+
     def _cancel_capture(self) -> None:
         with self._lock:
             self._cancel_capture_locked()
@@ -1611,16 +1623,54 @@ class BarkCleanController:
         self._result_event = threading.Event()
         self._last_result: dict | None = None
         self._idle_timer: threading.Timer | None = None
+        self._startup_timer: threading.Timer | None = None
 
         # Silently initialize or pre-warm the Bark 3.0 Clean worker 3s after daemon startup
-        # so on a clean PC the runtime + model download begins immediately in the background.
-        if self.daemon is not None:
-            prewarm = threading.Timer(3.0, self._background_startup_init)
-            prewarm.daemon = True
-            prewarm.start()
+        # (only when Speech-to-Text is enabled) so on a clean PC the runtime + model download
+        # begins immediately in the background.
+        if self.daemon is not None and self.is_enabled:
+            self._startup_timer = threading.Timer(3.0, self._background_startup_init)
+            self._startup_timer.daemon = True
+            self._startup_timer.start()
+
+    @property
+    def is_enabled(self) -> bool:
+        """Return True if Speech-to-Text dictation is enabled in config."""
+        if self.daemon is None:
+            return True
+        with self.daemon._config_lock:
+            return bool(self.daemon.config.get("stt_enabled", True))
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable Speech-to-Text, immediately unloading the model when disabled."""
+        if not enabled:
+            if self._startup_timer is not None:
+                self._startup_timer.cancel()
+                self._startup_timer = None
+            self.learner.reset()
+            if self.recorder.is_recording or self._transcribing:
+                self.cancel_dictation()
+            else:
+                with self._lock:
+                    self._cancel_seq += 1
+                    self._active_req_id += 1
+                    self._result_event.set()
+                self.hud.hide()
+            self.shutdown()
+        else:
+            if self.daemon is not None and (
+                self._proc is None or self._proc.poll() is not None
+            ):
+                threading.Thread(
+                    target=self._background_startup_init,
+                    daemon=True,
+                    name="bark-reenable-warm",
+                ).start()
 
     def _background_startup_init(self) -> None:
         """Silently warm or bootstrap Bark 3.0 Clean in the background after launch."""
+        if not self.is_enabled:
+            return
         try:
             self._ensure_worker_started(allow_bootstrap=True)
         except Exception:
@@ -1650,8 +1700,11 @@ class BarkCleanController:
     ) -> str:
         """Toggle between starting microphone recording and stopping + transcribing.
 
-        Returns the new state: ``"recording"``, ``"transcribing"``, or ``"busy"``.
+        Returns the new state: ``"recording"``, ``"transcribing"``, ``"disabled"``, or ``"busy"``.
         """
+        if not self.is_enabled:
+            return "disabled"
+
         now = time.monotonic()
         if (now - self._last_toggle_time) < 0.25:
             return "busy"
@@ -1711,7 +1764,7 @@ class BarkCleanController:
         self, on_complete: Callable[[bool, str], None] | None = None
     ) -> bool:
         """Start capturing microphone audio with automatic end-of-speech detection."""
-        if self.recorder.is_recording or self._transcribing:
+        if not self.is_enabled or self.recorder.is_recording or self._transcribing:
             return False
         try:
             self._on_complete_cb = on_complete
@@ -1939,6 +1992,8 @@ class BarkCleanController:
 
     def paste_last_dictation(self) -> bool:
         """Re-paste the most recently dictated text into the focused input field."""
+        if not self.is_enabled:
+            return False
         now = time.monotonic()
         if (now - self._last_paste_time) < 0.25:
             return False
@@ -1973,8 +2028,14 @@ class BarkCleanController:
         Uses ``self._spawn_lock`` rather than ``self._lock`` so first-time runtime
         bootstrap or model downloads never block ``stop_and_transcribe`` or ``cancel_dictation``.
         """
+        if not self.is_enabled:
+            self._proc_error = "Speech-to-text is disabled."
+            return False
+
         with self._spawn_lock:
-            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+            if not self.is_enabled or (
+                cancel_seq is not None and self._cancel_seq != cancel_seq
+            ):
                 return False
 
             if self._proc is None or self._proc.poll() is not None:
@@ -1987,7 +2048,9 @@ class BarkCleanController:
                     )
                     return False
 
-                if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                if not self.is_enabled or (
+                    cancel_seq is not None and self._cancel_seq != cancel_seq
+                ):
                     return False
 
                 bark_dir = get_bark_dir()
@@ -2008,6 +2071,14 @@ class BarkCleanController:
                     creationflags=CREATE_NO_WINDOW,
                 )
                 with self._lock:
+                    if not self.is_enabled or (
+                        cancel_seq is not None and self._cancel_seq != cancel_seq
+                    ):
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return False
                     self._proc = proc
                 threading.Thread(
                     target=self._stdout_reader,
@@ -2025,12 +2096,19 @@ class BarkCleanController:
         # Poll in 0.15s intervals so pressing Escape cancels immediately even while downloading/loading
         deadline = time.monotonic() + 600.0
         while not self._proc_ready.wait(timeout=0.15):
+            if not self.is_enabled:
+                self.shutdown()
+                return False
             if cancel_seq is not None and self._cancel_seq != cancel_seq:
                 return False
             if time.monotonic() >= deadline:
                 self._proc_error = "Timed out initializing Bark 3.0 Clean."
                 self.shutdown()
                 return False
+
+        if not self.is_enabled:
+            self.shutdown()
+            return False
 
         self.hud.clear_status()
         self._reset_idle_timer()
@@ -2105,7 +2183,10 @@ class BarkCleanController:
         self._idle_timer.start()
 
     def shutdown(self) -> None:
-        """Stop the Bark 3.0 Clean worker process and release its RAM."""
+        """Stop the Bark 3.0 Clean worker process and release its RAM immediately."""
+        if self._startup_timer is not None:
+            self._startup_timer.cancel()
+            self._startup_timer = None
         if self._idle_timer is not None:
             self._idle_timer.cancel()
             self._idle_timer = None
@@ -2118,9 +2199,25 @@ class BarkCleanController:
                 if proc.stdin:
                     proc.stdin.write('{"cmd": "quit"}\n')
                     proc.stdin.flush()
-                proc.wait(timeout=2.0)
+                proc.wait(timeout=0.8)
             except Exception:
                 try:
                     proc.kill()
+                    proc.wait(timeout=1.0)
                 except Exception:
                     pass
+        try:
+            gc.collect()
+            k32 = ctypes.windll.kernel32
+            k32.SetProcessWorkingSetSize.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+            ]
+            k32.SetProcessWorkingSetSize(
+                k32.GetCurrentProcess(),
+                ctypes.c_size_t(-1),
+                ctypes.c_size_t(-1),
+            )
+        except Exception:
+            pass

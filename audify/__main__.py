@@ -143,6 +143,8 @@ def _selftest(report_path: str) -> int:
         ctrl = BarkCleanController()
         if ctrl.is_busy:
             raise RuntimeError("BarkCleanController unexpectedly busy at init")
+        ctrl.set_enabled(False)
+        ctrl.set_enabled(True)
         if apply_stt_vocabulary("Hello Yamin", {"Yamin": "Yeamin"}) != "Hello Yeamin":
             raise RuntimeError("apply_stt_vocabulary failed word replacement check")
         ctrl.learner.record_dictation("Hello Yamin from Projen")

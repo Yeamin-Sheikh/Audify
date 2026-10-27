@@ -134,6 +134,7 @@ class TTSDaemon:
             paste_last_hotkey=paste_last_hotkey_str,
             on_paste_last_hotkey=self.paste_last_dictation,
             on_escape_hotkey=self.stt.on_escape_pressed,
+            stt_enabled=bool(self.config.get("stt_enabled", True)),
         )
 
         # Tray icon (injected later)
@@ -297,10 +298,14 @@ class TTSDaemon:
 
     def toggle_dictation(self) -> None:
         """Toggle Bark 3.0 Clean microphone dictation on/off."""
+        if not self.config.get("stt_enabled", True):
+            return
         self.stt.toggle_dictation()
 
     def paste_last_dictation(self) -> None:
         """Re-paste the most recently dictated speech into the active input field."""
+        if not self.config.get("stt_enabled", True):
+            return
         self.stt.paste_last_dictation()
 
     def set_stt_silence_delay(self, delay_s: float) -> None:
@@ -379,25 +384,26 @@ class TTSDaemon:
                 if self._stop_double_tap.poll() or self._is_stop_combo_down():
                     self.stop_audio()
 
-                if self._dictation_double_tap.poll():
-                    self.toggle_dictation()
-                else:
-                    dict_down = self._is_dictation_combo_down()
-                    if dict_down and not self._dictation_combo_was_down:
-                        self._dictation_combo_was_down = True
+                if self.config.get("stt_enabled", True):
+                    if self._dictation_double_tap.poll():
                         self.toggle_dictation()
-                    elif not dict_down:
-                        self._dictation_combo_was_down = False
+                    else:
+                        dict_down = self._is_dictation_combo_down()
+                        if dict_down and not self._dictation_combo_was_down:
+                            self._dictation_combo_was_down = True
+                            self.toggle_dictation()
+                        elif not dict_down:
+                            self._dictation_combo_was_down = False
 
-                if self._paste_last_double_tap.poll():
-                    self.paste_last_dictation()
-                else:
-                    paste_down = self._is_paste_last_combo_down()
-                    if paste_down and not self._paste_last_combo_was_down:
-                        self._paste_last_combo_was_down = True
+                    if self._paste_last_double_tap.poll():
                         self.paste_last_dictation()
-                    elif not paste_down:
-                        self._paste_last_combo_was_down = False
+                    else:
+                        paste_down = self._is_paste_last_combo_down()
+                        if paste_down and not self._paste_last_combo_was_down:
+                            self._paste_last_combo_was_down = True
+                            self.paste_last_dictation()
+                        elif not paste_down:
+                            self._paste_last_combo_was_down = False
             except Exception:
                 pass
             time.sleep(0.015)
@@ -409,10 +415,12 @@ class TTSDaemon:
             keyboard._pressed_events.clear()
         except Exception:
             pass
-        try:
-            self.stt.learner.on_key_press(event)
-        except Exception:
-            pass
+        stt_on = bool(self.config.get("stt_enabled", True))
+        if stt_on:
+            try:
+                self.stt.learner.on_key_press(event)
+            except Exception:
+                pass
         name = (getattr(event, "name", "") or "").lower()
         if name in ("esc", "escape") and self.stt.is_busy:
             self.stt.cancel_dictation()
@@ -424,10 +432,10 @@ class TTSDaemon:
             self.last_ctrl_c_time = time.time()
         elif self._is_stop_combo_down():
             self.stop_audio()
-        elif self._is_dictation_combo_down() and not self._dictation_combo_was_down:
+        elif stt_on and self._is_dictation_combo_down() and not self._dictation_combo_was_down:
             self._dictation_combo_was_down = True
             self.toggle_dictation()
-        elif self._is_paste_last_combo_down() and not self._paste_last_combo_was_down:
+        elif stt_on and self._is_paste_last_combo_down() and not self._paste_last_combo_was_down:
             self._paste_last_combo_was_down = True
             self.paste_last_dictation()
 
@@ -435,10 +443,11 @@ class TTSDaemon:
         self, x: int, y: int, button: pynput_mouse.Button, pressed: bool
     ) -> None:
         """Record timestamp on any mouse click (for Wispr Flow heuristic) and notify STT learner."""
-        try:
-            self.stt.learner.on_mouse_click(x, y, button, pressed)
-        except Exception:
-            pass
+        if self.config.get("stt_enabled", True):
+            try:
+                self.stt.learner.on_mouse_click(x, y, button, pressed)
+            except Exception:
+                pass
         if pressed:
             self.last_ctrl_c_time = time.time()
             self._dictation_double_tap.taint()
@@ -516,6 +525,26 @@ class TTSDaemon:
         if not new_val:
             self.stop_audio()
         self._notify_state_change()
+
+    def set_stt_enabled(self, enabled: bool) -> None:
+        """Enable or disable Speech-to-Text dictation, unloading the Bark 3.0 model when off."""
+        new_val = bool(enabled)
+        with self._config_lock:
+            self.config["stt_enabled"] = new_val
+            save_config(self.config)
+        self._dictation_double_tap.reset()
+        self._paste_last_double_tap.reset()
+        self._dictation_combo_was_down = False
+        self._paste_last_combo_was_down = False
+        self._clip_listener.rebind_hotkeys(stt_enabled=new_val)
+        self.stt.set_enabled(new_val)
+        self._notify_state_change()
+
+    def toggle_stt_enabled(self) -> None:
+        """Toggle Speech-to-Text dictation on/off and unload the model when off."""
+        with self._config_lock:
+            current = bool(self.config.get("stt_enabled", True))
+        self.set_stt_enabled(not current)
 
     # -- Playback controls -------------------------------------------------
 
