@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+from ctypes import wintypes
 import os
 import queue
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Callable
 
@@ -52,6 +54,260 @@ except Exception:
     pass
 
 
+# -- Win32 CoreAudio (MMDeviceAPI / WASAPI) endpoint & session health helpers --
+
+_ole32 = ctypes.windll.ole32
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", wintypes.BYTE * 8),
+    ]
+
+    def __init__(self, guid_str: str) -> None:
+        u = uuid.UUID(guid_str)
+        super().__init__(
+            u.time_low,
+            u.time_mid,
+            u.time_hi_version,
+            (wintypes.BYTE * 8)(*u.bytes[8:]),
+        )
+
+
+_CLSID_MMDeviceEnumerator = _GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
+_IID_IMMDeviceEnumerator = _GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+_IID_IAudioSessionManager2 = _GUID("{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}")
+_IID_IAudioSessionControl2 = _GUID("{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}")
+_IID_ISimpleAudioVolume = _GUID("{87CE5498-68D6-44E5-9215-6DA47EF883D8}")
+
+
+def _com_vcall(obj: ctypes.c_void_p, idx: int, restype: type, *argtypes: type):
+    vtbl = ctypes.cast(
+        obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+    ).contents
+    fn = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtbl[idx])
+    return lambda *args: fn(obj, *args)
+
+
+def _com_release(obj: ctypes.c_void_p) -> None:
+    if obj and obj.value:
+        try:
+            _com_vcall(obj, 2, wintypes.ULONG)()
+        except Exception:
+            pass
+
+
+def _get_default_audio_endpoint_id() -> str:
+    """Return the active Windows default eRender audio endpoint ID string."""
+    hr_init = _ole32.CoInitializeEx(None, 0)
+    enum_ptr = ctypes.c_void_p()
+    dev_ptr = ctypes.c_void_p()
+    dev_id = wintypes.LPWSTR()
+    try:
+        hr = _ole32.CoCreateInstance(
+            ctypes.byref(_CLSID_MMDeviceEnumerator),
+            None,
+            7,
+            ctypes.byref(_IID_IMMDeviceEnumerator),
+            ctypes.byref(enum_ptr),
+        )
+        if hr != 0 or not enum_ptr.value:
+            return ""
+        # IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender=0, eConsole=0) -> vtable 4
+        hr = _com_vcall(
+            enum_ptr,
+            4,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(0, 0, ctypes.byref(dev_ptr))
+        if hr != 0 or not dev_ptr.value:
+            return ""
+        # IMMDevice::GetId -> vtable 5
+        hr = _com_vcall(
+            dev_ptr, 5, ctypes.c_long, ctypes.POINTER(wintypes.LPWSTR)
+        )(ctypes.byref(dev_id))
+        if hr != 0 or not dev_id.value:
+            return ""
+        return str(dev_id.value)
+    except Exception:
+        return ""
+    finally:
+        if dev_id.value:
+            try:
+                _ole32.CoTaskMemFree(dev_id)
+            except Exception:
+                pass
+        _com_release(dev_ptr)
+        _com_release(enum_ptr)
+        if hr_init in (0, 1):
+            try:
+                _ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def _verify_and_unmute_process_audio_session() -> bool:
+    """Verify our process has an active (state==1) audio session on the default speaker and unmute it.
+
+    Returns False if the default endpoint is healthy and enumerated, yet our process
+    has no active audio stream on it (indicating SDL2's WASAPI stream is stale/zombie
+    after a Bluetooth/speaker switch or sleep/wake).
+    """
+    hr_init = _ole32.CoInitializeEx(None, 0)
+    my_pid = os.getpid()
+    enum_ptr = ctypes.c_void_p()
+    dev_ptr = ctypes.c_void_p()
+    mgr_ptr = ctypes.c_void_p()
+    senum_ptr = ctypes.c_void_p()
+    try:
+        hr = _ole32.CoCreateInstance(
+            ctypes.byref(_CLSID_MMDeviceEnumerator),
+            None,
+            7,
+            ctypes.byref(_IID_IMMDeviceEnumerator),
+            ctypes.byref(enum_ptr),
+        )
+        if hr != 0 or not enum_ptr.value:
+            return True
+        hr = _com_vcall(
+            enum_ptr,
+            4,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(0, 0, ctypes.byref(dev_ptr))
+        if hr != 0 or not dev_ptr.value:
+            return True
+        hr = _com_vcall(
+            dev_ptr,
+            3,
+            ctypes.c_long,
+            ctypes.POINTER(_GUID),
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(ctypes.byref(_IID_IAudioSessionManager2), 7, None, ctypes.byref(mgr_ptr))
+        if hr != 0 or not mgr_ptr.value:
+            return True
+        hr = _com_vcall(
+            mgr_ptr, 5, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p)
+        )(ctypes.byref(senum_ptr))
+        if hr != 0 or not senum_ptr.value:
+            return True
+
+        scnt = ctypes.c_int()
+        hr = _com_vcall(
+            senum_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int)
+        )(ctypes.byref(scnt))
+        if hr != 0:
+            return True
+
+        has_active_session = False
+        for i in range(scnt.value):
+            s_ptr = ctypes.c_void_p()
+            s2_ptr = ctypes.c_void_p()
+            vol_ptr = ctypes.c_void_p()
+            try:
+                if (
+                    _com_vcall(
+                        senum_ptr,
+                        4,
+                        ctypes.c_long,
+                        ctypes.c_int,
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(i, ctypes.byref(s_ptr))
+                    != 0
+                    or not s_ptr.value
+                ):
+                    continue
+                if (
+                    _com_vcall(
+                        s_ptr,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(_GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(ctypes.byref(_IID_IAudioSessionControl2), ctypes.byref(s2_ptr))
+                    != 0
+                    or not s2_ptr.value
+                ):
+                    continue
+                pid = wintypes.DWORD()
+                _com_vcall(
+                    s2_ptr, 14, ctypes.c_long, ctypes.POINTER(wintypes.DWORD)
+                )(ctypes.byref(pid))
+                if pid.value != my_pid:
+                    continue
+
+                # Ensure Windows Volume Mixer has not muted or zeroed Audify's session
+                if (
+                    _com_vcall(
+                        s_ptr,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(_GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(ctypes.byref(_IID_ISimpleAudioVolume), ctypes.byref(vol_ptr))
+                    == 0
+                    and vol_ptr.value
+                ):
+                    mute = wintypes.BOOL()
+                    _com_vcall(
+                        vol_ptr, 6, ctypes.c_long, ctypes.POINTER(wintypes.BOOL)
+                    )(ctypes.byref(mute))
+                    if mute.value:
+                        _com_vcall(
+                            vol_ptr,
+                            5,
+                            ctypes.c_long,
+                            wintypes.BOOL,
+                            ctypes.c_void_p,
+                        )(False, None)
+                    mvol = ctypes.c_float()
+                    _com_vcall(
+                        vol_ptr, 4, ctypes.c_long, ctypes.POINTER(ctypes.c_float)
+                    )(ctypes.byref(mvol))
+                    if mvol.value < 0.05:
+                        _com_vcall(
+                            vol_ptr,
+                            3,
+                            ctypes.c_long,
+                            ctypes.c_float,
+                            ctypes.c_void_p,
+                        )(1.0, None)
+
+                state = ctypes.c_int()
+                _com_vcall(
+                    s2_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int)
+                )(ctypes.byref(state))
+                if state.value == 1:  # AudioSessionStateActive
+                    has_active_session = True
+            finally:
+                _com_release(vol_ptr)
+                _com_release(s2_ptr)
+                _com_release(s_ptr)
+
+        return has_active_session
+    except Exception:
+        return True
+    finally:
+        _com_release(senum_ptr)
+        _com_release(mgr_ptr)
+        _com_release(dev_ptr)
+        _com_release(enum_ptr)
+        if hr_init in (0, 1):
+            try:
+                _ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
 class TTSDaemon:
     """Background daemon that converts queued text to speech via Edge TTS."""
 
@@ -67,6 +323,8 @@ class TTSDaemon:
         self._mixer_lock = threading.Lock()
         self._save_timer: threading.Timer | None = None
         self._tts_channel: pygame.mixer.Channel | None = None
+        self._mixer_endpoint_id: str = ""
+        self._last_playback_end_time: float = 0.0
 
         # Wispr Flow heuristic -- tracks when the user last triggered a manual copy or click
         self.last_ctrl_c_time: float = 0.0
@@ -205,6 +463,20 @@ class TTSDaemon:
         48kHz stereo configurations. Never raises an unhandled exception.
         """
         with self._mixer_lock:
+            cur_endpoint = _get_default_audio_endpoint_id()
+            idle_secs = (
+                (time.monotonic() - self._last_playback_end_time)
+                if self._last_playback_end_time > 0.0
+                else 0.0
+            )
+            endpoint_changed = bool(
+                cur_endpoint
+                and pygame.mixer.get_init() is not None
+                and cur_endpoint != self._mixer_endpoint_id
+            )
+            if endpoint_changed or idle_secs > 90.0:
+                force_reinit = True
+
             if not force_reinit and pygame.mixer.get_init() is not None and self._tts_channel is not None:
                 return self._tts_channel
 
@@ -239,6 +511,10 @@ class TTSDaemon:
                                     raw_vol = float(self.config.get("volume", 1.0))
                                 vol = raw_vol / 100.0 if raw_vol > 1.0 else raw_vol
                                 self._tts_channel.set_volume(max(0.0, min(1.0, vol)))
+                                self._mixer_endpoint_id = (
+                                    cur_endpoint or _get_default_audio_endpoint_id()
+                                )
+                                self._last_playback_end_time = time.monotonic()
                                 return self._tts_channel
                         except Exception as e:
                             last_err = e
@@ -862,6 +1138,8 @@ class TTSDaemon:
         highest_chunk = -1
         paused_total = 0.0
         restarting = False
+        first_play_time = 0.0
+        verified_live_session = False
 
         def aborted() -> bool:
             return not self.q.empty() or stop_generation != self._stop_generation
@@ -926,9 +1204,41 @@ class TTSDaemon:
                             channel.queue(sound)
                         else:
                             channel.play(sound)
+                            if not verified_live_session:
+                                first_play_time = time.monotonic()
                         playing.append((sound, index))
                     current = channel.get_sound()
                     still_busy = channel.get_busy()
+
+                    # Verify that the Windows Audio Session on the active speaker is
+                    # genuinely active (state==1) and unmuted; if SDL2's WASAPI stream
+                    # went stale after a headphone/speaker switch or sleep/wake, force re-init.
+                    if (
+                        still_busy
+                        and not verified_live_session
+                        and first_play_time > 0.0
+                        and (time.monotonic() - first_play_time) >= 0.08
+                    ):
+                        verified_live_session = True
+                        if not _verify_and_unmute_process_audio_session():
+                            print(
+                                "[WARN] SDL2 audio stream inactive on default speaker; re-initializing mixer..."
+                            )
+                            channel = self._ensure_mixer(retries=2, force_reinit=True)
+                            new_fmt = pygame.mixer.get_init()
+                            if channel is None or new_fmt is None:
+                                self._notify_error(
+                                    "Audio output device disconnected during playback."
+                                )
+                                return None
+                            if (new_fmt[0], new_fmt[2]) != (frequency, channels):
+                                restarting = True
+                                return unread_text()
+                            if current is not None:
+                                channel.play(current)
+                                if len(playing) >= 2 and playing[-1][0] is not current:
+                                    channel.queue(playing[-1][0])
+                            still_busy = channel.get_busy()
                 except pygame.error:
                     # Audio output endpoint changed or dropped mid-session; re-init mixer
                     channel = self._ensure_mixer(retries=2, force_reinit=True)
@@ -955,6 +1265,7 @@ class TTSDaemon:
                 if decoded_all and not ready and not still_busy:
                     return None
         finally:
+            self._last_playback_end_time = time.monotonic()
             session.cancel()
             if restarting or aborted():
                 self._halt_channel()

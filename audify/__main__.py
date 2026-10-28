@@ -112,7 +112,9 @@ def _selftest(report_path: str) -> int:
         os.environ.pop("SDL_AUDIODRIVER", None)
         if mixer_fmt is None:
             raise RuntimeError("All audio drivers (wasapi, directsound, winmm) failed to initialize")
-        lines.append(f"audio-mixer: ok (driver={active_drv}, format={mixer_fmt})")
+        ep_id = audify.engine._get_default_audio_endpoint_id()
+        _ = audify.engine._verify_and_unmute_process_audio_session()
+        lines.append(f"audio-mixer: ok (driver={active_drv}, format={mixer_fmt}, endpoint={bool(ep_id)})")
     except Exception as e:
         ok = False
         lines.append(f"audio-mixer: FAILED {e!r}")

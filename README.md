@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.11.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.18.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -169,7 +169,7 @@ build_exe.bat
 ```
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
-installer uses. The installer is written to `Output\Setup_Audify_2.9.1.exe`.
+installer uses. The installer is written to `Output\Setup_Audify_2.9.18.exe`.
 
 Verify that a build works end-to-end:
 
@@ -201,6 +201,10 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.18
+
+- **Self-Healing Windows Audio Output & Endpoint Hot-Switch Recovery**: fixed an issue where SDL2 (`pygame.mixer`) could remain bound to a stale or invalidated WASAPI session after switching between Bluetooth headphones and speakers or after Windows sleep/wake, causing the tray icon to turn blue (`Reading`) while outputting zero audio (`AudioSessionStateInactive`). Added Win32 CoreAudio (`MMDeviceAPI` / `IAudioSessionManager2`) endpoint tracking (`_get_default_audio_endpoint_id`) and live session verification (`_verify_and_unmute_process_audio_session`) in `audify/engine.py` so Audify automatically re-initializes the audio mixer whenever the default output endpoint changes, after idle periods, or if Windows reports the audio stream is inactive or muted.
 
 ### v2.9.17
 
