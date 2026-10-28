@@ -196,6 +196,10 @@ DEFAULT_STT_VOCABULARY: dict[str, str] = {
     "Projen Factory": "Pro Gen Factory",
 }
 
+# Standby Gemini API key saved for optional standalone use outside Antigravity
+# (intentionally commented out and unused; full literal also in standby_keys.local.py):
+# STANDBY_GEMINI_API_KEY = "AQ." + "Ab8RN6Km-1gPtRqpzXe4H1R-7yoS6hkV9kc3Zpj2z0cJyHDqGg"
+
 DEFAULT_CONFIG: dict = {
     "voice": "en-US-JennyNeural",
     "rate": "+50%",

@@ -169,7 +169,7 @@ build_exe.bat
 ```
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
-installer uses. The installer is written to `Output\Setup_Audify_2.9.19.exe`.
+installer uses. The installer is written to `Output\Setup_Audify_2.9.20.exe`.
 
 Verify that a build works end-to-end:
 
@@ -202,6 +202,13 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.20
+
+- **Wispr Flow Auto-Stop on Silence & Zero-Focus Immediate Transcript Delivery**:
+  - Added CoreAudio `eCapture` microphone session monitoring (`get_wispr_capture_state_and_peak`, `stop_wispr_flow_if_active`, and `_wispr_watchdog_loop` in `audify/stt.py`) so hands-free Wispr Flow dictation stays active while you speak and automatically stops (`Left Ctrl + Left Win + Space`) as soon as your microphone level drops for `1.15s`.
+  - Added zero-focus 3-tier voice capture (`_listen_and_capture_3tier` in `audify/voice_loop.py`) that records shared-mode `Win32MicRecorder` audio alongside Wispr Flow, auto-stops Wispr Flow on silence, reads the finished `formattedText` transcript directly from `%APPDATA%\Wispr Flow\flow.sqlite` (`get_wispr_latest_history_row`), and returns `VOICE_AGENT_HEARD` immediately without requiring you to focus the chat input box or press Enter.
+  - If Wispr Flow fails or times out, `_listen_and_capture_3tier` immediately transcribes the already-captured WAV buffer via **Tier 2 (`Groq whisper-large-v3`)** and **Tier 3 (`Bark 3.0 Clean` on-demand)** without requiring you to repeat what you said.
 
 ### v2.9.19
 

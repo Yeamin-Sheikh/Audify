@@ -81,9 +81,11 @@ NUM_BUFFERS = 6
 
 # -- Voice Activity Detection (VAD) auto-stop constants ----------------------
 # Each chunk is 100ms (0.1s) of 16 kHz 16-bit mono PCM.
-VAD_IGNORE_INITIAL_CHUNKS = 2       # Ignore first 200ms (hotkey release click)
-VAD_PRE_ROLL_CHUNKS = 4             # Keep 400ms before speech onset
-VAD_END_SILENCE_CHUNKS = 14         # Auto-stop after 1.4s of silence post-speech
+# On Windows laptops with Intel Smart Sound / Realtek APO, cold mic open has a 2.4s AGC/NS
+# convergence period (550-870 RMS) before locking into the quiet floor (~80 RMS).
+VAD_IGNORE_INITIAL_CHUNKS = 24      # Ignore first 2.4s on cold open (hardware AGC/NS convergence)
+VAD_PRE_ROLL_CHUNKS = 5             # Keep 500ms before speech onset
+VAD_END_SILENCE_CHUNKS = 18         # Auto-stop after 1.8s of silence post-speech
 VAD_TRAILING_KEEP_CHUNKS = 4        # Keep 400ms of trailing silence after speech
 VAD_NO_SPEECH_TIMEOUT_CHUNKS = 80   # Cancel after 8.0s if user never speaks
 
@@ -185,9 +187,14 @@ class Win32MicRecorder:
         self._open_event = threading.Event()
         self._open_error: str | None = None
         self._auto_stop_cb: Callable[[str], None] | None = None
+        self._vad_enabled: bool = True
+        self._vad_reset_requested: bool = False
+        self._silence_delay_s: float = 1.0
+        self._no_speech_timeout_s: float = 8.0
         self.current_level: float = 0.0
         self.level_bars: list[float] = [0.08] * 9
         self.speech_detected: bool = False
+        self.speech_chunks: int = 0
 
     @property
     def is_recording(self) -> bool:
@@ -198,12 +205,13 @@ class Win32MicRecorder:
         on_auto_stop: Callable[[str], None] | None = None,
         auto_stop_on_silence: bool = True,
         silence_delay_s: float = 1.0,
+        no_speech_timeout_s: float = 8.0,
     ) -> None:
         """Open the default microphone and begin capturing 16 kHz mono PCM frames.
 
         When *auto_stop_on_silence* is True (default), automatically stops recording
         once the user speaks and then pauses for *silence_delay_s* seconds,
-        or after 8 seconds if no speech is detected, invoking ``on_auto_stop(reason)``.
+        or after *no_speech_timeout_s* seconds if no speech is detected, invoking ``on_auto_stop(reason)``.
         """
         with self._lock:
             if self._recording:
@@ -227,12 +235,18 @@ class Win32MicRecorder:
             self.current_level = 0.0
             self.level_bars = [0.08] * 9
             self.speech_detected = False
+            self.speech_chunks = 0
             self._auto_stop_cb = on_auto_stop
+            self._vad_enabled = auto_stop_on_silence
+            self._vad_reset_requested = False
+            self._silence_delay_s = silence_delay_s
+            self._no_speech_timeout_s = no_speech_timeout_s
+            self._started_at = time.monotonic()
             self._open_event.clear()
             self._open_error = None
             self._thread = threading.Thread(
                 target=self._record_loop,
-                args=(auto_stop_on_silence, silence_delay_s),
+                args=(auto_stop_on_silence, silence_delay_s, no_speech_timeout_s),
                 daemon=True,
                 name="win32-mic-recorder",
             )
@@ -241,6 +255,25 @@ class Win32MicRecorder:
         self._open_event.wait(timeout=2.0)
         if self._open_error is not None:
             raise RuntimeError(self._open_error)
+
+    def arm_vad(
+        self,
+        on_auto_stop: Callable[[str], None] | None = None,
+        silence_delay_s: float = 2.0,
+        no_speech_timeout_s: float = 120.0,
+    ) -> None:
+        """Clear pre-warmed audio frames and arm VAD immediately with zero hardware AGC warmup delay."""
+        with self._lock:
+            self._frames = []
+            self._trim_start_idx = 0
+            self._trim_end_idx = None
+            self.speech_detected = False
+            self.speech_chunks = 0
+            self._auto_stop_cb = on_auto_stop
+            self._silence_delay_s = silence_delay_s
+            self._no_speech_timeout_s = no_speech_timeout_s
+            self._vad_reset_requested = True
+            self._vad_enabled = True
 
     def stop_and_save(self, wav_path: str) -> float:
         """Stop recording, write captured PCM to *wav_path*, and return duration in seconds."""
@@ -300,8 +333,10 @@ class Win32MicRecorder:
         self,
         auto_stop_on_silence: bool = True,
         silence_delay_s: float = 1.0,
+        no_speech_timeout_s: float = 8.0,
     ) -> None:
-        end_silence_chunks = max(4, min(30, int(round(float(silence_delay_s) * 10.0))))
+        end_silence_chunks = max(4, min(40, int(round(float(silence_delay_s) * 10.0))))
+        no_speech_chunks = max(30, int(round(float(no_speech_timeout_s) * 10.0)))
         wfx = WAVEFORMATEX()
         wfx.wFormatTag = WAVE_FORMAT_PCM
         wfx.nChannels = CHANNELS
@@ -331,8 +366,11 @@ class Win32MicRecorder:
         headers = [WAVEHDR() for _ in range(NUM_BUFFERS)]
         hdr_size = ctypes.sizeof(WAVEHDR)
 
-        # Adaptive VAD state
-        noise_floor = 160.0
+        # Adaptive VAD state calibrated for post-AGC-convergence floor (~80-110 RMS, ~250-350 peak)
+        noise_floor = 100.0
+        noise_seeded = False
+        unmuted_chunks = 0
+        ignore_chunks = VAD_IGNORE_INITIAL_CHUNKS
         speech_started = False
         active_streak = 0
         silence_streak = 0
@@ -350,6 +388,24 @@ class Win32MicRecorder:
             _winmm.waveInStart(h_wave_in)
 
             while self._recording:
+                if self._vad_reset_requested:
+                    with self._lock:
+                        self._vad_reset_requested = False
+                        end_silence_chunks = max(
+                            4, min(40, int(round(float(self._silence_delay_s) * 10.0)))
+                        )
+                        no_speech_chunks = max(
+                            30, int(round(float(self._no_speech_timeout_s) * 10.0))
+                        )
+                        speech_started = False
+                        active_streak = 0
+                        silence_streak = 0
+                        chunk_count = 0
+                        unmuted_chunks = 0
+                        ignore_chunks = 2  # Hardware is already warm!
+                        noise_seeded = False
+                        noise_floor = 100.0
+
                 any_done = False
                 for i in range(NUM_BUFFERS):
                     if headers[i].dwFlags & WHDR_DONE:
@@ -360,22 +416,29 @@ class Win32MicRecorder:
                             self._frames.append(raw_chunk)
                             chunk_count += 1
                             rms, peak = _frame_rms_and_peak(raw_chunk)
-                            norm_lvl = min(1.0, max(0.05, (rms - noise_floor * 0.8) / 2600.0))
+                            if rms >= 15.0:
+                                unmuted_chunks += 1
+                                if not noise_seeded and unmuted_chunks > ignore_chunks:
+                                    noise_floor = max(75.0, min(280.0, rms))
+                                    noise_seeded = True
+                            norm_lvl = min(1.0, max(0.05, (rms - noise_floor * 0.85) / 2200.0))
                             self.current_level = 0.45 * self.current_level + 0.55 * norm_lvl
                             bars = list(self.level_bars[1:]) + [self.current_level]
                             self.level_bars = bars
 
-                            if auto_stop_on_silence:
+                            if self._vad_enabled:
                                 if not speech_started:
-                                    if chunk_count > VAD_IGNORE_INITIAL_CHUNKS:
+                                    if unmuted_chunks > ignore_chunks:
                                         onset_thresh = max(
-                                            380.0, min(1400.0, noise_floor * 2.8)
+                                            380.0, min(1400.0, noise_floor * 3.0)
                                         )
-                                        if rms >= onset_thresh and peak >= 950:
+                                        onset_peak = max(1200, int(noise_floor * 4.5))
+                                        if rms >= onset_thresh and peak >= onset_peak:
                                             active_streak += 1
-                                            if active_streak >= 2:
+                                            if active_streak >= 3:
                                                 speech_started = True
                                                 self.speech_detected = True
+                                                self.speech_chunks = active_streak
                                                 self._trim_start_idx = max(
                                                     0,
                                                     len(self._frames)
@@ -385,24 +448,26 @@ class Win32MicRecorder:
                                                 silence_streak = 0
                                         else:
                                             active_streak = 0
-                                            if rms < noise_floor * 2.0:
+                                            if rms >= 15.0 and rms < noise_floor * 1.8:
                                                 noise_floor = (
                                                     0.85 * noise_floor
-                                                    + 0.15 * max(60.0, min(600.0, rms))
+                                                    + 0.15 * max(70.0, min(300.0, rms))
                                                 )
                                         if (
                                             not speech_started
-                                            and chunk_count >= VAD_NO_SPEECH_TIMEOUT_CHUNKS
+                                            and chunk_count >= no_speech_chunks
                                         ):
                                             auto_stop_reason = "no_speech"
                                             self._recording = False
                                             break
                                 else:
                                     cont_thresh = max(
-                                        250.0, min(1000.0, noise_floor * 1.85)
+                                        250.0, min(900.0, noise_floor * 2.1)
                                     )
-                                    if rms >= cont_thresh:
+                                    cont_peak = max(900, int(noise_floor * 3.8))
+                                    if rms >= cont_thresh or peak >= cont_peak:
                                         silence_streak = 0
+                                        self.speech_chunks += 1
                                     else:
                                         silence_streak += 1
                                         if silence_streak >= end_silence_chunks:
@@ -1628,8 +1693,15 @@ def get_wispr_config_path() -> str:
     return os.path.join(appdata, "Wispr Flow", "config.json")
 
 
-def is_wispr_flow_running() -> bool:
-    """Return True if ``Wispr Flow.exe`` is currently running on Windows."""
+def get_wispr_db_path() -> str:
+    """Return the path to Wispr Flow's flow.sqlite database in %APPDATA%."""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    return os.path.join(appdata, "Wispr Flow", "flow.sqlite")
+
+
+def get_wispr_flow_pids() -> set[int]:
+    """Return all running ``Wispr Flow.exe`` and ``Wispr Flow Helper.exe`` process IDs."""
+    pids: set[int] = set()
     try:
         TH32CS_SNAPPROCESS = 0x00000002
 
@@ -1649,21 +1721,271 @@ def is_wispr_flow_running() -> bool:
 
         h_snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
         if h_snap == wintypes.HANDLE(-1).value or not h_snap:
-            return False
+            return pids
         try:
             pe = PROCESSENTRY32W()
             pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
             if _kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
                 while True:
-                    if pe.szExeFile.lower() == "wispr flow.exe":
-                        return True
+                    exe_low = pe.szExeFile.lower()
+                    if exe_low in ("wispr flow.exe", "wispr flow helper.exe"):
+                        pids.add(int(pe.th32ProcessID))
                     if not _kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
                         break
         finally:
             _kernel32.CloseHandle(h_snap)
     except Exception:
         pass
-    return False
+    return pids
+
+
+def is_wispr_flow_running() -> bool:
+    """Return True if ``Wispr Flow.exe`` is currently running on Windows."""
+    return len(get_wispr_flow_pids()) > 0
+
+
+def get_wispr_capture_state_and_peak(
+    wispr_pids: set[int] | None = None,
+) -> tuple[bool, float]:
+    """Query Windows CoreAudio eCapture sessions for Wispr Flow.
+
+    Returns ``(is_recording_active, mic_peak_0_to_1)`` so we know with 100% accuracy
+    when Wispr Flow is actively capturing the microphone and when the user's voice/pitch drops.
+    """
+    pids = wispr_pids if wispr_pids is not None else get_wispr_flow_pids()
+    if not pids:
+        return False, 0.0
+
+    from audify.engine import (
+        _CLSID_MMDeviceEnumerator,
+        _GUID,
+        _IID_IAudioSessionControl2,
+        _IID_IAudioSessionManager2,
+        _IID_IMMDeviceEnumerator,
+        _com_release,
+        _com_vcall,
+        _ole32,
+    )
+
+    iid_meter = _GUID("{C02216F6-8C67-4B5B-9D00-D008E73E0064}")
+    hr_init = _ole32.CoInitializeEx(None, 0)
+    enum_ptr = ctypes.c_void_p()
+    dev_ptr = ctypes.c_void_p()
+    mgr_ptr = ctypes.c_void_p()
+    senum_ptr = ctypes.c_void_p()
+    dev_meter_ptr = ctypes.c_void_p()
+    try:
+        if (
+            _ole32.CoCreateInstance(
+                ctypes.byref(_CLSID_MMDeviceEnumerator),
+                None,
+                7,
+                ctypes.byref(_IID_IMMDeviceEnumerator),
+                ctypes.byref(enum_ptr),
+            )
+            != 0
+            or not enum_ptr.value
+        ):
+            return False, 0.0
+        # eCapture = 1, eConsole = 0
+        if (
+            _com_vcall(
+                enum_ptr,
+                4,
+                ctypes.c_long,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_void_p),
+            )(1, 0, ctypes.byref(dev_ptr))
+            != 0
+            or not dev_ptr.value
+        ):
+            return False, 0.0
+        if (
+            _com_vcall(
+                dev_ptr,
+                3,
+                ctypes.c_long,
+                ctypes.POINTER(_GUID),
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            )(ctypes.byref(_IID_IAudioSessionManager2), 7, None, ctypes.byref(mgr_ptr))
+            != 0
+            or not mgr_ptr.value
+        ):
+            return False, 0.0
+        if (
+            _com_vcall(mgr_ptr, 5, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p))(
+                ctypes.byref(senum_ptr)
+            )
+            != 0
+            or not senum_ptr.value
+        ):
+            return False, 0.0
+
+        scnt = ctypes.c_int()
+        if (
+            _com_vcall(senum_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int))(
+                ctypes.byref(scnt)
+            )
+            != 0
+        ):
+            return False, 0.0
+
+        is_active = False
+        max_peak = 0.0
+        for i in range(scnt.value):
+            s_ptr = ctypes.c_void_p()
+            s2_ptr = ctypes.c_void_p()
+            m_ptr = ctypes.c_void_p()
+            try:
+                if (
+                    _com_vcall(
+                        senum_ptr,
+                        4,
+                        ctypes.c_long,
+                        ctypes.c_int,
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(i, ctypes.byref(s_ptr))
+                    != 0
+                    or not s_ptr.value
+                ):
+                    continue
+                if (
+                    _com_vcall(
+                        s_ptr,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(_GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(ctypes.byref(_IID_IAudioSessionControl2), ctypes.byref(s2_ptr))
+                    != 0
+                    or not s2_ptr.value
+                ):
+                    continue
+                pid = wintypes.DWORD()
+                _com_vcall(s2_ptr, 14, ctypes.c_long, ctypes.POINTER(wintypes.DWORD))(
+                    ctypes.byref(pid)
+                )
+                if int(pid.value) not in pids:
+                    continue
+                st = ctypes.c_int()
+                _com_vcall(s2_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int))(
+                    ctypes.byref(st)
+                )
+                if st.value == 1:
+                    is_active = True
+                    if (
+                        _com_vcall(
+                            s_ptr,
+                            0,
+                            ctypes.c_long,
+                            ctypes.POINTER(_GUID),
+                            ctypes.POINTER(ctypes.c_void_p),
+                        )(ctypes.byref(iid_meter), ctypes.byref(m_ptr))
+                        == 0
+                        and m_ptr.value
+                    ):
+                        pk = ctypes.c_float()
+                        _com_vcall(
+                            m_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_float)
+                        )(ctypes.byref(pk))
+                        if pk.value > max_peak:
+                            max_peak = float(pk.value)
+            finally:
+                _com_release(m_ptr)
+                _com_release(s2_ptr)
+                _com_release(s_ptr)
+
+        if is_active and max_peak == 0.0:
+            # Also check endpoint-level capture meter as fallback
+            if (
+                _com_vcall(
+                    dev_ptr,
+                    3,
+                    ctypes.c_long,
+                    ctypes.POINTER(_GUID),
+                    wintypes.DWORD,
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_void_p),
+                )(ctypes.byref(iid_meter), 7, None, ctypes.byref(dev_meter_ptr))
+                == 0
+                and dev_meter_ptr.value
+            ):
+                pk = ctypes.c_float()
+                _com_vcall(
+                    dev_meter_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_float)
+                )(ctypes.byref(pk))
+                if pk.value > max_peak:
+                    max_peak = float(pk.value)
+
+        return is_active, max_peak
+    except Exception:
+        return False, 0.0
+    finally:
+        _com_release(dev_meter_ptr)
+        _com_release(senum_ptr)
+        _com_release(mgr_ptr)
+        _com_release(dev_ptr)
+        _com_release(enum_ptr)
+        if hr_init in (0, 1):
+            try:
+                _ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def stop_wispr_flow_if_active() -> bool:
+    """Stop Wispr Flow hands-free recording if its Windows capture session is currently active."""
+    active, _ = get_wispr_capture_state_and_peak()
+    if not active:
+        return False
+    return trigger_wispr_flow_handsfree()
+
+
+def dismiss_wispr_flow_if_active() -> bool:
+    """Dismiss/cancel Wispr Flow recording via Escape (shortcut '27': 'dismiss') without transcribing silence."""
+    active, _ = get_wispr_capture_state_and_peak()
+    if not active:
+        return False
+    try:
+        _user32.keybd_event(VK_ESCAPE, 0, 0, 0)
+        time.sleep(0.03)
+        _user32.keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def get_wispr_latest_history_row() -> tuple[str, str, str]:
+    """Read the newest row from Wispr Flow's ``flow.sqlite`` ``History`` table.
+
+    Returns ``(timestamp_str, transcript_text, status_str)``.
+    """
+    db_path = get_wispr_db_path()
+    if not os.path.exists(db_path):
+        return "", "", ""
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(db_path, timeout=2.0)
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT timestamp, formattedText, asrText, status FROM History ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                return "", "", ""
+            ts = str(row[0] or "")
+            text = str(row[1] or row[2] or "").strip()
+            status = str(row[3] or "")
+            return ts, text, status
+        finally:
+            con.close()
+    except Exception:
+        return "", "", ""
 
 
 def get_wispr_latest_error() -> tuple[int, str]:
@@ -1816,6 +2138,16 @@ def transcribe_with_groq(
             with urllib.request.urlopen(req, timeout=15.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
             text = str(payload.get("text", "")).strip()
+            low_t = text.lower().strip(" .!,?")
+            if low_t in {
+                "subtitles by the amara.org community",
+                "amara.org",
+                "thanks for watching",
+                "thank you for watching",
+                "thank you",
+                "you",
+            } or "amara.org" in low_t or "subtitles by" in low_t:
+                return False, "Filtered Whisper silence hallucination."
             return True, text
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -1873,7 +2205,7 @@ class BarkCleanController:
             ).start()
 
     def _wispr_watchdog_loop(self) -> None:
-        """Monitor Wispr Flow's config.json for new error notifications and auto-failover to Groq STT."""
+        """Monitor Wispr Flow for (1) hands-free auto-stop on mic silence and (2) error auto-failover to Groq STT."""
         cfg_path = get_wispr_config_path()
         last_mtime = 0.0
         last_err_ts, _ = get_wispr_latest_error()
@@ -1883,8 +2215,97 @@ class BarkCleanController:
             except Exception:
                 pass
 
+        wispr_speech_started = False
+        wispr_active_ticks = 0
+        wispr_silence_since: float | None = None
+        wispr_session_start: float | None = None
+        ambient_peak = 0.012
+        lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
+
         while True:
-            time.sleep(0.45)
+            # Yield auto-stop control if --speak-and-listen holds audify_voiceloop.lock or Global\AudifyVoiceLoopActive
+            vl_mutex = _kernel32.OpenMutexW(0x00100000, False, "Global\\AudifyVoiceLoopActive")
+            if vl_mutex:
+                _kernel32.CloseHandle(vl_mutex)
+                wispr_session_start = None
+                wispr_speech_started = False
+                wispr_active_ticks = 0
+                wispr_silence_since = None
+                time.sleep(0.35)
+                continue
+            if os.path.exists(lock_file):
+                try:
+                    if (time.time() - os.path.getmtime(lock_file)) < 180.0:
+                        wispr_session_start = None
+                        wispr_speech_started = False
+                        wispr_active_ticks = 0
+                        wispr_silence_since = None
+                        time.sleep(0.35)
+                        continue
+                except Exception:
+                    pass
+
+            is_act, mic_peak = get_wispr_capture_state_and_peak()
+            if is_act:
+                if wispr_session_start is None:
+                    wispr_session_start = time.monotonic()
+                    wispr_speech_started = False
+                    wispr_active_ticks = 0
+                    wispr_silence_since = None
+                    ambient_peak = 0.012
+
+                # Ignore first 2.6s after cold Wispr Flow start so hardware AGC/NS convergence does not trigger speech onset
+                if (time.monotonic() - wispr_session_start) < 2.6:
+                    time.sleep(0.05)
+                    continue
+
+                # Skip auto-stop if the user is physically holding Left Ctrl + Left Win (push-to-talk)
+                ptt_held = bool(_user32.GetAsyncKeyState(VK_LCONTROL) & 0x8000) and bool(
+                    _user32.GetAsyncKeyState(VK_LWIN) & 0x8000
+                )
+                if not ptt_held:
+                    silence_delay_s = 2.0
+                    if self.daemon is not None:
+                        with self.daemon._config_lock:
+                            silence_delay_s = max(
+                                1.6,
+                                float(self.daemon.config.get("stt_silence_delay", 2.0)),
+                            )
+                    if not wispr_speech_started:
+                        onset_peak = max(0.038, min(0.12, ambient_peak * 2.8))
+                        if mic_peak >= onset_peak:
+                            wispr_active_ticks += 1
+                            if wispr_active_ticks >= 5:
+                                wispr_speech_started = True
+                                wispr_silence_since = None
+                        else:
+                            wispr_active_ticks = 0
+                            if mic_peak >= 0.002 and mic_peak < ambient_peak * 1.8:
+                                ambient_peak = 0.85 * ambient_peak + 0.15 * max(0.006, min(0.025, mic_peak))
+                    else:
+                        cont_peak = max(0.026, min(0.08, ambient_peak * 2.0))
+                        if mic_peak >= cont_peak:
+                            wispr_silence_since = None
+                        else:
+                            if wispr_silence_since is None:
+                                wispr_silence_since = time.monotonic()
+                            elif (time.monotonic() - wispr_silence_since) >= silence_delay_s:
+                                # User finished speaking and mic pitch/level dropped -> stop Wispr Flow!
+                                stop_wispr_flow_if_active()
+                                wispr_session_start = None
+                                wispr_speech_started = False
+                                wispr_active_ticks = 0
+                                wispr_silence_since = None
+                                time.sleep(0.35)
+                                continue
+                time.sleep(0.05)
+            else:
+                wispr_session_start = None
+                wispr_speech_started = False
+                wispr_active_ticks = 0
+                wispr_silence_since = None
+                time.sleep(0.35)
+
             if not self.is_enabled or self.is_busy:
                 continue
             try:

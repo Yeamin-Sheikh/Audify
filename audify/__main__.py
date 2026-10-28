@@ -134,6 +134,8 @@ def _selftest(report_path: str) -> int:
             BarkCleanController,
             find_bark_python,
             get_bark_dir,
+            get_wispr_capture_state_and_peak,
+            get_wispr_latest_history_row,
             is_wispr_flow_running,
             resolve_groq_api_key,
         )
@@ -156,6 +158,8 @@ def _selftest(report_path: str) -> int:
         if ctrl._proc is not None:
             raise RuntimeError("BarkCleanController must not pre-load Bark 3.0 on set_enabled(True)")
         _ = is_wispr_flow_running()
+        _ = get_wispr_capture_state_and_peak()
+        _ = get_wispr_latest_history_row()
         _ = resolve_groq_api_key()
         if apply_stt_vocabulary("Hello Yamin", {"Yamin": "Yeamin"}) != "Hello Yeamin":
             raise RuntimeError("apply_stt_vocabulary failed word replacement check")
@@ -215,10 +219,19 @@ def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         sys.exit(_selftest(sys.argv[2]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--speak-and-listen":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
         from audify.voice_loop import speak_and_trigger_hierarchy
 
         res = speak_and_trigger_hierarchy(sys.argv[2], trigger_listen_after=True)
-        print(res)
+        print(res, flush=True)
+        if res.get("transcript"):
+            print(
+                f"VOICE_AGENT_HEARD ({res.get('stt_tier_triggered')}): {res.get('transcript')}",
+                flush=True,
+            )
         sys.exit(0)
 
     # Only one Audify instance can run at a time.
