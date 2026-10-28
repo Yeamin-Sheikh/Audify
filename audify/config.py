@@ -208,6 +208,8 @@ DEFAULT_CONFIG: dict = {
     "dictation_hotkey": "double_lctrl",
     "paste_last_hotkey": "ctrl+alt+v",
     "stt_silence_delay": 1.0,
+    "groq_api_key": "",
+    "groq_model": "whisper-large-v3",
     "pronunciation_dict": {},
     "stt_vocabulary": {},
     "removed_stt_vocabulary": [],
@@ -355,6 +357,23 @@ def load_config() -> dict:
         stt_changed = True
     if not isinstance(config.get("stt_enabled"), bool):
         config["stt_enabled"] = True
+        stt_changed = True
+    env_groq = os.environ.get("GROQ_API_KEY", "").strip()
+    if not env_groq and sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as k:
+                val, _ = winreg.QueryValueEx(k, "GROQ_API_KEY")
+                if isinstance(val, str) and val.strip():
+                    env_groq = val.strip()
+        except Exception:
+            pass
+    if env_groq and not str(config.get("groq_api_key", "")).strip():
+        config["groq_api_key"] = env_groq
+        stt_changed = True
+    if not str(config.get("groq_model", "")).strip():
+        config["groq_model"] = "whisper-large-v3"
         stt_changed = True
     if loaded is not None and ("stt_enabled" not in loaded or "read_on_copy" not in loaded):
         stt_changed = True

@@ -1596,10 +1596,248 @@ def bootstrap_bark_python(
         return find_bark_python()
 
 
-class BarkCleanController:
-    """Manages microphone recording, Bark 3.0 Clean sidecar lifecycle, and auto-paste."""
+# -- Tier 1 (Wispr Flow Bridge) & Tier 2 (Groq Whisper Large v3 Cloud STT) ---
 
-    IDLE_UNLOAD_SECONDS = 1800.0
+VK_LCONTROL = 0xA2
+VK_LWIN = 0x5B
+VK_SPACE = 0x20
+
+_WISPR_ERROR_KEYS: tuple[str, ...] = (
+    "TranscriptionError",
+    "NoInternet",
+    "WeeklyWordsLimitReached",
+    "HelperLoadingError",
+    "HelperNotReady",
+    "HelperPersistentFailure",
+    "MicDisconnected",
+    "MicNotFound",
+    "MicDeviceUnavailable",
+    "MicNotReadable",
+    "MicAccessError",
+    "NoAudio",
+    "NoAudioDuringDictation",
+    "NoAudioDuringDictationEscalated",
+    "MicAccessTimeout",
+    "TranscriptIncomplete",
+)
+
+
+def get_wispr_config_path() -> str:
+    """Return the path to Wispr Flow's config.json in %APPDATA%."""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    return os.path.join(appdata, "Wispr Flow", "config.json")
+
+
+def is_wispr_flow_running() -> bool:
+    """Return True if ``Wispr Flow.exe`` is currently running on Windows."""
+    try:
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        h_snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if h_snap == wintypes.HANDLE(-1).value or not h_snap:
+            return False
+        try:
+            pe = PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if _kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+                while True:
+                    if pe.szExeFile.lower() == "wispr flow.exe":
+                        return True
+                    if not _kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                        break
+        finally:
+            _kernel32.CloseHandle(h_snap)
+    except Exception:
+        pass
+    return False
+
+
+def get_wispr_latest_error() -> tuple[int, str]:
+    """Inspect Wispr Flow's config.json notifications and return ``(latest_timestamp_ms, error_name)``."""
+    cfg_path = get_wispr_config_path()
+    if not os.path.exists(cfg_path):
+        return 0, ""
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        notifs = data.get("notifications") or {}
+        best_ts = 0
+        best_key = ""
+        for k in _WISPR_ERROR_KEYS:
+            entry = notifs.get(k)
+            if isinstance(entry, dict):
+                ts = int(entry.get("lastShownTime") or 0)
+                if ts > best_ts:
+                    best_ts = ts
+                    best_key = k
+        return best_ts, best_key
+    except Exception:
+        return 0, ""
+
+
+def trigger_wispr_flow_handsfree() -> bool:
+    """Trigger Wispr Flow's hands-free toggle shortcut (``Left Ctrl + Left Win + Space``).
+
+    Returns True if ``Wispr Flow.exe`` is running and the shortcut was sent, or False
+    if Wispr Flow is not running so the caller can immediately fall back to Tier 2 (Groq).
+    """
+    if not is_wispr_flow_running():
+        return False
+    try:
+        _user32.keybd_event(VK_LCONTROL, 0, 0, 0)
+        _user32.keybd_event(VK_LWIN, 0, 0, 0)
+        _user32.keybd_event(VK_SPACE, 0, 0, 0)
+        time.sleep(0.035)
+        _user32.keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def resolve_groq_api_key(daemon: TTSDaemon | None = None) -> str:
+    """Resolve the user's Groq API key from config, process env, or HKCU\\Environment."""
+    if daemon is not None:
+        try:
+            with daemon._config_lock:
+                k = str(daemon.config.get("groq_api_key", "")).strip()
+            if k:
+                return k
+        except Exception:
+            pass
+    env_k = os.environ.get("GROQ_API_KEY", "").strip()
+    if env_k:
+        return env_k
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as reg_key:
+                val, _ = winreg.QueryValueEx(reg_key, "GROQ_API_KEY")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def transcribe_with_groq(
+    wav_path: str,
+    api_key: str,
+    model: str = "whisper-large-v3",
+    vocab: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Transcribe *wav_path* via Groq's highest-accuracy ``whisper-large-v3`` model.
+
+    Uses zero local model RAM. Passes custom STT vocabulary targets in the Whisper
+    ``prompt`` parameter so names and technical terms are recognized cleanly.
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return False, "No Groq API key configured."
+    if not os.path.exists(wav_path):
+        return False, "Audio file missing."
+
+    try:
+        with open(wav_path, "rb") as f:
+            wav_bytes = f.read()
+    except Exception as e:
+        return False, f"Could not read recorded WAV: {e}"
+
+    vocab_terms: list[str] = []
+    if vocab:
+        seen: set[str] = set()
+        for target in vocab.values():
+            t = str(target).strip()
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                vocab_terms.append(t)
+    prompt_str = (
+        "Transcribe clearly with accurate punctuation and capitalization. "
+        + (f"Vocabulary: {', '.join(vocab_terms[:40])}." if vocab_terms else "")
+    ).strip()
+
+    models_to_try = [model] if model == "whisper-large-v3-turbo" else [model, "whisper-large-v3-turbo"]
+    last_err = ""
+
+    for cur_model in models_to_try:
+        boundary = f"----AudifyGroqBoundary{int(time.time() * 1000)}"
+        parts: list[bytes] = []
+
+        def _add_field(name: str, value: str) -> None:
+            parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n".encode("utf-8")
+            )
+
+        _add_field("model", cur_model)
+        _add_field("temperature", "0")
+        _add_field("response_format", "json")
+        _add_field("language", "en")
+        if prompt_str:
+            _add_field("prompt", prompt_str)
+
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="dictation.wav"\r\n'
+            f"Content-Type: audio/wav\r\n\r\n".encode("utf-8")
+        )
+        parts.append(wav_bytes)
+        parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(parts)
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "Audify/2.9.19",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            text = str(payload.get("text", "")).strip()
+            return True, text
+        except urllib.error.HTTPError as e:
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
+            last_err = f"Groq HTTP {e.code}: {err_body or e.reason}"
+            if e.code == 429 and cur_model != models_to_try[-1]:
+                continue
+            break
+        except Exception as e:
+            last_err = f"Groq request error: {e}"
+            break
+
+    return False, last_err or "Groq transcription failed."
+
+
+class BarkCleanController:
+    """Manages 3-tier STT hierarchy: Wispr Flow -> Groq whisper-large-v3 -> Bark 3.0 Clean (last resort)."""
+
+    IDLE_UNLOAD_SECONDS = 60.0
 
     def __init__(self, daemon: TTSDaemon | None = None) -> None:
         self.daemon = daemon
@@ -1616,7 +1854,8 @@ class BarkCleanController:
         self._last_paste_time = 0.0
         self._on_complete_cb: Callable[[bool, str], None] | None = None
 
-        # Sidecar subprocess state
+        # Sidecar subprocess state (Bark 3.0 Clean is NEVER pre-warmed at startup or idle;
+        # it is loaded strictly on demand if Tier 2 Groq fails, and unloaded immediately after)
         self._proc: subprocess.Popen | None = None
         self._proc_ready = threading.Event()
         self._proc_error: str | None = None
@@ -1625,13 +1864,46 @@ class BarkCleanController:
         self._idle_timer: threading.Timer | None = None
         self._startup_timer: threading.Timer | None = None
 
-        # Silently initialize or pre-warm the Bark 3.0 Clean worker 3s after daemon startup
-        # (only when Speech-to-Text is enabled) so on a clean PC the runtime + model download
-        # begins immediately in the background.
-        if self.daemon is not None and self.is_enabled:
-            self._startup_timer = threading.Timer(3.0, self._background_startup_init)
-            self._startup_timer.daemon = True
-            self._startup_timer.start()
+        # Watch Wispr Flow (Tier 1) for failures so Audify can automatically take over with Tier 2 (Groq)
+        if self.daemon is not None:
+            threading.Thread(
+                target=self._wispr_watchdog_loop,
+                daemon=True,
+                name="wispr-flow-watchdog",
+            ).start()
+
+    def _wispr_watchdog_loop(self) -> None:
+        """Monitor Wispr Flow's config.json for new error notifications and auto-failover to Groq STT."""
+        cfg_path = get_wispr_config_path()
+        last_mtime = 0.0
+        last_err_ts, _ = get_wispr_latest_error()
+        if os.path.exists(cfg_path):
+            try:
+                last_mtime = os.path.getmtime(cfg_path)
+            except Exception:
+                pass
+
+        while True:
+            time.sleep(0.45)
+            if not self.is_enabled or self.is_busy:
+                continue
+            try:
+                if not os.path.exists(cfg_path):
+                    continue
+                mtime = os.path.getmtime(cfg_path)
+                if mtime <= last_mtime:
+                    continue
+                last_mtime = mtime
+                err_ts, err_key = get_wispr_latest_error()
+                now_ms = int(time.time() * 1000)
+                if err_ts > last_err_ts and abs(now_ms - err_ts) <= 8000:
+                    last_err_ts = err_ts
+                    print(
+                        f"[STT] Detected Wispr Flow failure ({err_key}); switching to Groq whisper-large-v3 fallback..."
+                    )
+                    self.start_dictation()
+            except Exception:
+                pass
 
     @property
     def is_enabled(self) -> bool:
@@ -1642,7 +1914,7 @@ class BarkCleanController:
             return bool(self.daemon.config.get("stt_enabled", True))
 
     def set_enabled(self, enabled: bool) -> None:
-        """Enable or disable Speech-to-Text, immediately unloading the model when disabled."""
+        """Enable or disable Speech-to-Text, immediately unloading any fallback model when disabled."""
         if not enabled:
             if self._startup_timer is not None:
                 self._startup_timer.cancel()
@@ -1657,31 +1929,10 @@ class BarkCleanController:
                     self._result_event.set()
                 self.hud.hide()
             self.shutdown()
-        else:
-            if self.daemon is not None and (
-                self._proc is None or self._proc.poll() is not None
-            ):
-                threading.Thread(
-                    target=self._background_startup_init,
-                    daemon=True,
-                    name="bark-reenable-warm",
-                ).start()
 
     def _background_startup_init(self) -> None:
-        """Silently warm or bootstrap Bark 3.0 Clean in the background after launch."""
-        if not self.is_enabled:
-            return
-        try:
-            self._ensure_worker_started(allow_bootstrap=True)
-        except Exception:
-            pass
-        finally:
-            if (
-                self.daemon is not None
-                and not self.daemon.is_speaking
-                and not self.is_busy
-            ):
-                self.daemon._set_status("Ready", speaking=False)
+        """No-op: Bark 3.0 Clean is never pre-loaded into RAM unless Groq fails."""
+        return
 
     @property
     def is_recording(self) -> bool:
@@ -1788,12 +2039,6 @@ class BarkCleanController:
             self.hud.show()
             if self.daemon is not None:
                 self.daemon._set_status("Listening...", speaking=False)
-            # Pre-warm the worker while the user speaks without blocking self._lock
-            threading.Thread(
-                target=lambda: self._ensure_worker_started(allow_bootstrap=True),
-                daemon=True,
-                name="bark-prewarm",
-            ).start()
             return True
         except Exception as e:
             self.hud.hide()
@@ -1911,63 +2156,101 @@ class BarkCleanController:
     def transcribe_file(
         self, wav_path: str, cancel_seq: int | None = None
     ) -> tuple[bool, str]:
-        """Send *wav_path* to the Bark 3.0 Clean worker and return ``(ok, text_or_error)``."""
-        if not self._ensure_worker_started(allow_bootstrap=True, cancel_seq=cancel_seq):
-            if cancel_seq is not None and self._cancel_seq != cancel_seq:
-                return False, "Dictation cancelled."
-            err = self._proc_error or "Could not start Bark 3.0 Clean Python runtime."
-            if self.daemon is not None:
-                self.daemon._notify_error(err)
-            return False, err
-
+        """Transcribe *wav_path* using Tier 2 (Groq whisper-large-v3) first, falling back to Tier 3 (Bark 3.0 Clean) only as a last resort."""
         if cancel_seq is not None and self._cancel_seq != cancel_seq:
             return False, "Dictation cancelled."
 
-        self.hud.clear_status()
-        if self.daemon is not None and self._transcribing:
-            self.daemon._set_status("Transcribing...", speaking=False)
-
-        with self._lock:
-            if cancel_seq is not None and self._cancel_seq != cancel_seq:
-                return False, "Dictation cancelled."
-            proc = self._proc
-            if proc is None or proc.poll() is not None or proc.stdin is None:
-                return False, "Bark 3.0 Clean worker terminated unexpectedly."
-
-            self._active_req_id += 1
-            req_id = self._active_req_id
-            self._result_event.clear()
-            self._last_result = None
-            payload = (
-                json.dumps(
-                    {"cmd": "transcribe", "wav_path": wav_path, "req_id": req_id}
-                )
-                + "\n"
-            )
-            proc.stdin.write(payload)
-            proc.stdin.flush()
-
-        if not self._result_event.wait(timeout=120.0):
-            return False, "Bark 3.0 Clean transcription timed out."
-
-        if cancel_seq is not None and self._cancel_seq != cancel_seq:
-            return False, "Dictation cancelled."
-
-        self._reset_idle_timer()
-        res = self._last_result or {}
-        if res.get("cancelled"):
-            return False, "Dictation cancelled."
-        if res.get("ok"):
-            raw_text = str(res.get("text", "")).strip()
-            if raw_text and self.daemon is not None:
-                with self.daemon._config_lock:
-                    vocab = dict(self.daemon.config.get("stt_vocabulary", {}))
-                raw_text = apply_stt_vocabulary(raw_text, vocab)
-            return True, raw_text
-        err_msg = str(res.get("error", "Unknown transcription error"))
+        vocab: dict[str, str] = {}
+        groq_model = "whisper-large-v3"
         if self.daemon is not None:
-            self.daemon._notify_error(f"Bark 3.0 Clean error: {err_msg}")
-        return False, err_msg
+            with self.daemon._config_lock:
+                vocab = dict(self.daemon.config.get("stt_vocabulary", {}))
+                groq_model = (
+                    str(self.daemon.config.get("groq_model", "whisper-large-v3")).strip()
+                    or "whisper-large-v3"
+                )
+
+        # Tier 2: Groq whisper-large-v3 cloud STT (0 MB local model RAM, highest accuracy)
+        groq_key = resolve_groq_api_key(self.daemon)
+        if groq_key:
+            self.hud.clear_status()
+            if self.daemon is not None and self._transcribing:
+                self.daemon._set_status("Transcribing (Groq v3)...", speaking=False)
+            ok_groq, groq_res = transcribe_with_groq(
+                wav_path, groq_key, model=groq_model, vocab=vocab
+            )
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False, "Dictation cancelled."
+            if ok_groq:
+                raw_text = groq_res.strip()
+                if raw_text and vocab:
+                    raw_text = apply_stt_vocabulary(raw_text, vocab)
+                return True, raw_text
+            print(
+                f"[WARN] Groq whisper-large-v3 failed ({groq_res}); falling back to Bark 3.0 Clean last resort..."
+            )
+            self._report_setup_status("Groq unavailable — loading Bark 3.0 fallback...")
+
+        # Tier 3 (Last Resort): Load Bark 3.0 Clean on demand, transcribe, and unload immediately after
+        try:
+            if not self._ensure_worker_started(
+                allow_bootstrap=True, cancel_seq=cancel_seq
+            ):
+                if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                    return False, "Dictation cancelled."
+                err = self._proc_error or "Could not start Bark 3.0 Clean Python runtime."
+                if self.daemon is not None:
+                    self.daemon._notify_error(err)
+                return False, err
+
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False, "Dictation cancelled."
+
+            self.hud.clear_status()
+            if self.daemon is not None and self._transcribing:
+                self.daemon._set_status("Transcribing (Bark 3.0)...", speaking=False)
+
+            with self._lock:
+                if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                    return False, "Dictation cancelled."
+                proc = self._proc
+                if proc is None or proc.poll() is not None or proc.stdin is None:
+                    return False, "Bark 3.0 Clean worker terminated unexpectedly."
+
+                self._active_req_id += 1
+                req_id = self._active_req_id
+                self._result_event.clear()
+                self._last_result = None
+                payload = (
+                    json.dumps(
+                        {"cmd": "transcribe", "wav_path": wav_path, "req_id": req_id}
+                    )
+                    + "\n"
+                )
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+
+            if not self._result_event.wait(timeout=120.0):
+                return False, "Bark 3.0 Clean transcription timed out."
+
+            if cancel_seq is not None and self._cancel_seq != cancel_seq:
+                return False, "Dictation cancelled."
+
+            res = self._last_result or {}
+            if res.get("cancelled"):
+                return False, "Dictation cancelled."
+            if res.get("ok"):
+                raw_text = str(res.get("text", "")).strip()
+                if raw_text and vocab:
+                    raw_text = apply_stt_vocabulary(raw_text, vocab)
+                return True, raw_text
+            err_msg = str(res.get("error", "Unknown transcription error"))
+            if self.daemon is not None:
+                self.daemon._notify_error(f"Bark 3.0 Clean error: {err_msg}")
+            return False, err_msg
+        finally:
+            # Always unload Bark 3.0 Clean immediately after last-resort fallback so ~500 MB RAM never stays resident
+            self.shutdown()
 
     def _copy_and_paste(self, text: str) -> None:
         """Copy *text* to clipboard without triggering TTS and paste via Ctrl+V."""

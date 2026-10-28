@@ -89,7 +89,7 @@ tray, understands Markdown and code, and knows how to say developer jargon prope
 
 ### Installer
 
-1. Download **`Setup_Audify_2.9.18.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
+1. Download **`Setup_Audify_2.9.19.exe`** from the [latest release](https://github.com/Yeamin-Sheikh/Audify/releases/latest).
 2. Run it. You can optionally add Desktop and "start with Windows" shortcuts.
 3. Look for the Audify icon in your system tray.
 
@@ -169,7 +169,7 @@ build_exe.bat
 ```
 
 `build_exe.bat` produces the portable `Audify.exe` and a folder build in `App\Audify\` that the
-installer uses. The installer is written to `Output\Setup_Audify_2.9.18.exe`.
+installer uses. The installer is written to `Output\Setup_Audify_2.9.19.exe`.
 
 Verify that a build works end-to-end:
 
@@ -184,7 +184,8 @@ audify/
 ├── __main__.py              Entry point, single-instance guard, --selftest
 ├── engine.py                Reader: clipboard queue, playback, speed/voice changes
 ├── playback.py              Low-latency Edge TTS streaming, concurrent chunk prefetch, MP3->PCM decode
-├── stt.py                   Speech-to-Text dictation engine powered by Underdog Bark 3.0 Clean
+├── stt.py                   3-Tier Speech-to-Text engine (Wispr Flow -> Groq whisper-large-v3 -> Bark 3.0 Clean)
+├── voice_loop.py            Live assistant voice loop (Edge TTS output + 3-tier STT auto-trigger)
 ├── updater.py               Weekly PyPI update checker for edge-tts
 ├── clipboard.py             Event-driven Win32 clipboard listener and native RegisterHotKey
 ├── config.py                Settings, voices, speeds, crash-safe saving
@@ -201,6 +202,13 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.19
+
+- **3-Tier Speech-to-Text Hierarchy & Zero-RAM Default Operation**:
+  - **Tier 1 (Wispr Flow Priority)**: added `trigger_wispr_flow_handsfree`, `is_wispr_flow_running`, `get_wispr_latest_error`, and `_wispr_watchdog_loop` in `audify/stt.py` along with `speak_and_trigger_hierarchy` in `audify/voice_loop.py` (`--speak-and-listen`) so live voice sessions automatically trigger Wispr Flow (`Left Ctrl + Left Win + Space`) after Edge TTS finishes speaking and monitor Wispr Flow for errors.
+  - **Tier 2 (Groq `whisper-large-v3` Cloud Fallback)**: added `transcribe_with_groq` in `audify/stt.py` using Groq's highest-accuracy `whisper-large-v3` model with custom STT vocabulary prompting (`0 MB` local model RAM). Automatically activates when Wispr Flow fails or when Audify dictation is triggered.
+  - **Tier 3 (Bark 3.0 Clean On-Demand Last Resort)**: removed all startup and recording pre-warming of the ~500 MB Bark 3.0 Clean sidecar. Bark 3.0 Clean is now loaded strictly as a last resort if Groq `whisper-large-v3` fails, and `self.shutdown()` unloads it from RAM immediately after transcription completes.
 
 ### v2.9.18
 
