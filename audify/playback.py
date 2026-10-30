@@ -116,6 +116,43 @@ def rate_to_speed(rate: str) -> float:
         return 1.0
 
 
+_MALE_VOICE_MARKERS: tuple[str, ...] = (
+    "Andrew", "Brian", "Christopher", "Guy", "Steffan",
+    "Eric", "Roger", "Ryan", "Thomas", "Pradeep", "Bashkar", "Madhur", "Asad", "Hamed",
+)
+
+
+def resolve_voice_for_text(text: str, default_voice: str) -> str:
+    """Select native Bangladeshi Bengali or Indian Hindi neural voice when script is detected."""
+    bn_count = 0
+    hi_count = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp in (0x0964, 0x0965):
+            continue
+        if 0x0980 <= cp <= 0x09FF:
+            bn_count += 1
+        elif 0x0900 <= cp <= 0x097F:
+            hi_count += 1
+    if bn_count == 0 and hi_count == 0:
+        return default_voice
+    is_male = any(m.lower() in default_voice.lower() for m in _MALE_VOICE_MARKERS)
+    if bn_count >= hi_count:
+        return default_voice if default_voice.lower().startswith("bn-") else ("bn-BD-PradeepNeural" if is_male else "bn-BD-NabanitaNeural")
+    return default_voice if default_voice.lower().startswith("hi-") else ("hi-IN-MadhurNeural" if is_male else "hi-IN-SwaraNeural")
+
+
+def resolve_rate_for_voice(voice: str, configured_rate: str) -> str:
+    """Keep Bengali and Hindi neural voices at natural +25% cadence."""
+    if voice.lower().startswith(("bn-", "hi-")):
+        try:
+            if int(configured_rate.strip().rstrip("%")) > 25:
+                return "+25%"
+        except Exception:
+            return "+25%"
+    return configured_rate
+
+
 class _ChunkSource(miniaudio.StreamableSource):
     """Hands one chunk's MP3 bytes to the decoder as they arrive from the network.
 
@@ -230,10 +267,12 @@ class SpeechSession:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             sent_audio = False
             try:
+                chunk_voice = resolve_voice_for_text(text, self.voice)
+                chunk_rate = resolve_rate_for_voice(chunk_voice, self.rate)
                 communicate = edge_tts.Communicate(
                     text,
-                    self.voice,
-                    rate=self.rate,
+                    chunk_voice,
+                    rate=chunk_rate,
                     boundary="SentenceBoundary",
                     connector=connector,
                     connect_timeout=CONNECT_TIMEOUT,

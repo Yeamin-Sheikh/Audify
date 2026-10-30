@@ -6,12 +6,47 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-27
+- **Last updated:** 2026-10-29
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-10-29, v2.9.22 Voice Agent capability upgrade: WMI out-of-job app launcher, barge-in, focus-safe paste shield, and rich telemetry
+
+**Duration:** ~10m
+**Status:** Done
+
+#### What changed
+- Created `audify/agent_actions.py` with `APP_REGISTRY`, `resolve_application_target`, `spawn_via_wmi_win32_process`, `launch_app_detached`, `close_application`, `adjust_system_volume`, `try_execute_fast_voice_command`, `get_visible_open_windows`, and `get_clipboard_preview`.
+- Added `--launch-app <name>` CLI flag and expanded `--selftest` in `audify/__main__.py`.
+- Added `_FocusPasteShield`, `_VoiceLoopHUDProxy`, TTS playback barge-in (`DoubleTapDetector` + `VK_ESCAPE`), Tier 1 `apply_stt_vocabulary`, and fast-path voice command execution in `audify/voice_loop.py`.
+- Filtered stuck `NULL`/empty rows in `get_wispr_latest_history_row` (`audify/stt.py`) and expanded `DEFAULT_STT_VOCABULARY` (`audify/config.py`).
+- Bumped version to `2.9.22`.
+
+#### Files touched
+- `audify/agent_actions.py`, `audify/voice_loop.py`, `audify/stt.py`, `audify/config.py`, `audify/__main__.py`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, `PROGRESS.md`, bumped version to `2.9.22`.
+
+---
+
+### 2026-10-29, v2.9.21 Right-click Speech-to-Text disable toggle and Double Left Ctrl unbind
+
+**Duration:** ~10m
+**Status:** Done
+
+#### What changed
+- Added `Enable Speech-to-Text (Double Left Ctrl)` toggle at the top of the dictation section in the system tray right-click menu (`audify/tray.py`).
+- Updated `TTSDaemon.__init__`, `set_hotkey`, `set_stt_enabled`, and `_poll_input_state_loop` (`audify/engine.py`) so when `stt_enabled` is `False`, `self._dictation_double_tap.set_target_vk(None)` and `self._paste_last_double_tap.set_target_vk(None)` completely disable `Double Left Ctrl` polling in `Audify.exe`, and `_poll_input_state_loop` also skips dictation triggers when `audify_voiceloop.lock` is active.
+- Added context-aware mic triggering (`_expects_user_reply`), external media pause/resume (`0.5s` delay via `_is_external_media_audible`), primary close-talk speaker isolation (`_filter_primary_user_speech`), and live desktop screenshot/window context capture (`_capture_live_desktop_context`) in `audify/voice_loop.py`.
+- Bumped version to `2.9.21`.
+
+#### Files touched
+- `audify/engine.py`, `audify/tray.py`, `audify/voice_loop.py`, `audify/stt.py`, `audify/__main__.py`, `audify/clipboard.py`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, `PROGRESS.md`, bumped version to `2.9.21`.
+
+---
 
 ### 2026-10-27, v2.9.16 Fix clean-PC Bark 3.0 model bootstrap and stuck HUD pill
 

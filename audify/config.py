@@ -190,7 +190,20 @@ for _word, _spoken in _LIBRARY.items():
 # -- Default Speech-to-Text (STT) custom vocabulary / auto-learned replacements
 DEFAULT_STT_VOCABULARY: dict[str, str] = {
     "AudiFi": "Audify",
-    "Audifi": "Audify",
+    "audit file": "Audify",
+    "Portify": "Audify",
+    "AutoFile": "Audify",
+    "auto file": "Audify",
+    "Auditify": "Audify",
+    "Autify": "Audify",
+    "Odify": "Audify",
+    "Ultra studio": "Ultra Studio",
+    "Ads Power": "AdsPower",
+    "Adspower": "AdsPower",
+    "HLS skill": "Agent-S skill",
+    "Agent S": "Agent-S",
+    "Cap Cut": "CapCut",
+    "ask Maomao": "ask me now",
     "Yamin": "Yeamin",
     "Yemen Sheikh": "Yeamin Sheikh",
     "Projen Factory": "Pro Gen Factory",
@@ -201,11 +214,12 @@ DEFAULT_STT_VOCABULARY: dict[str, str] = {
 # STANDBY_GEMINI_API_KEY = "AQ." + "Ab8RN6Km-1gPtRqpzXe4H1R-7yoS6hkV9kc3Zpj2z0cJyHDqGg"
 
 DEFAULT_CONFIG: dict = {
-    "voice": "en-US-JennyNeural",
-    "rate": "+50%",
+    "voice": "en-US-AvaMultilingualNeural",
+    "rate": "+55%",
     "volume": 1.0,
     "read_on_copy": True,
-    "stt_enabled": True,
+    "stt_enabled": False,
+    "conversation_mode": False,
     "skip_code_blocks": True,
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
@@ -240,6 +254,12 @@ VOICES: dict[str, str] = {
     "Roger (Natural Male)": "en-US-RogerNeural",
     "Ryan (British Male)": "en-GB-RyanNeural",
     "Thomas (British Male)": "en-GB-ThomasNeural",
+    "Nabanita (Bengali BD Female)": "bn-BD-NabanitaNeural",
+    "Pradeep (Bengali BD Male)": "bn-BD-PradeepNeural",
+    "Tanishaa (Bengali IN Female)": "bn-IN-TanishaaNeural",
+    "Bashkar (Bengali IN Male)": "bn-IN-BashkarNeural",
+    "Swara (Hindi Female)": "hi-IN-SwaraNeural",
+    "Madhur (Hindi Male)": "hi-IN-MadhurNeural",
 }
 
 RATES: dict[str, str] = {
@@ -247,6 +267,7 @@ RATES: dict[str, str] = {
     "1.0x (Normal)": "+0%",
     "1.25x": "+25%",
     "1.5x (Fast)": "+50%",
+    "1.55x (Default)": "+55%",
     "1.7x (Faster)": "+70%",
     "2.0x (Very Fast)": "+100%",
     # High-speed playback rates for fast scanning and power listening.
@@ -340,11 +361,13 @@ def load_config() -> dict:
     if not isinstance(stt_vocab, dict):
         stt_vocab = {}
         config["stt_vocabulary"] = stt_vocab
-    removed_stt = set(config.setdefault("removed_stt_vocabulary", []))
+    removed_stt_low = {str(x).lower() for x in config.setdefault("removed_stt_vocabulary", [])}
+    existing_stt_low = {str(x).lower() for x in stt_vocab.keys()}
     stt_changed = False
     for k, v in DEFAULT_STT_VOCABULARY.items():
-        if k not in stt_vocab and k not in removed_stt:
+        if k.lower() not in existing_stt_low and k.lower() not in removed_stt_low:
             stt_vocab[k] = v
+            existing_stt_low.add(k.lower())
             stt_changed = True
     if config.get("dictation_hotkey") == "ctrl+alt+d" and not config.get("dictation_hotkey_migrated_v299"):
         config["dictation_hotkey"] = "double_lctrl"
@@ -361,6 +384,9 @@ def load_config() -> dict:
         stt_changed = True
     if not isinstance(config.get("stt_enabled"), bool):
         config["stt_enabled"] = True
+        stt_changed = True
+    if not isinstance(config.get("conversation_mode"), bool):
+        config["conversation_mode"] = False
         stt_changed = True
     env_groq = os.environ.get("GROQ_API_KEY", "").strip()
     if not env_groq and sys.platform == "win32":
@@ -381,7 +407,7 @@ def load_config() -> dict:
         stt_changed = True
     if loaded is not None and ("stt_enabled" not in loaded or "read_on_copy" not in loaded):
         stt_changed = True
-    if stt_changed and not changed:
+    if stt_changed:
         save_config(config)
 
     return config
@@ -494,5 +520,5 @@ def apply_stt_vocabulary(text: str, vocab: dict[str, str] | None) -> str:
     out = text
     for heard, written in items:
         pat = re.compile(rf"(?<!\w){re.escape(heard)}(?!\w)", re.IGNORECASE)
-        out = pat.sub(written, out)
+        out = pat.sub(lambda _m, w=written: w, out)
     return out

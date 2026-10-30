@@ -366,11 +366,9 @@ class Win32MicRecorder:
         headers = [WAVEHDR() for _ in range(NUM_BUFFERS)]
         hdr_size = ctypes.sizeof(WAVEHDR)
 
-        # Adaptive VAD state calibrated for post-AGC-convergence floor (~80-110 RMS, ~250-350 peak)
-        noise_floor = 100.0
-        noise_seeded = False
-        unmuted_chunks = 0
-        ignore_chunks = VAD_IGNORE_INITIAL_CHUNKS
+        # Adaptive VAD state calibrated for real-time close-talk speech vs silence
+        noise_floor = 60.0
+        ignore_chunks = 2
         speech_started = False
         active_streak = 0
         silence_streak = 0
@@ -401,10 +399,8 @@ class Win32MicRecorder:
                         active_streak = 0
                         silence_streak = 0
                         chunk_count = 0
-                        unmuted_chunks = 0
-                        ignore_chunks = 2  # Hardware is already warm!
-                        noise_seeded = False
-                        noise_floor = 100.0
+                        ignore_chunks = 2
+                        noise_floor = 60.0
 
                 any_done = False
                 for i in range(NUM_BUFFERS):
@@ -416,29 +412,25 @@ class Win32MicRecorder:
                             self._frames.append(raw_chunk)
                             chunk_count += 1
                             rms, peak = _frame_rms_and_peak(raw_chunk)
-                            if rms >= 15.0:
-                                unmuted_chunks += 1
-                                if not noise_seeded and unmuted_chunks > ignore_chunks:
-                                    noise_floor = max(75.0, min(280.0, rms))
-                                    noise_seeded = True
                             norm_lvl = min(1.0, max(0.05, (rms - noise_floor * 0.85) / 2200.0))
                             self.current_level = 0.45 * self.current_level + 0.55 * norm_lvl
                             bars = list(self.level_bars[1:]) + [self.current_level]
                             self.level_bars = bars
 
                             if self._vad_enabled:
+                                # Ignore only the first 2 chunks (200ms) for waveInStart hardware pop.
+                                # Track chunk_count (all 100ms chunks, including silent ones) so silence_streak
+                                # increments immediately as soon as the user stops speaking.
                                 if not speech_started:
-                                    if unmuted_chunks > ignore_chunks:
-                                        onset_thresh = max(
-                                            380.0, min(1400.0, noise_floor * 3.0)
-                                        )
-                                        onset_peak = max(1200, int(noise_floor * 4.5))
+                                    if chunk_count > ignore_chunks:
+                                        onset_thresh = 135.0
+                                        onset_peak = 420
                                         if rms >= onset_thresh and peak >= onset_peak:
                                             active_streak += 1
-                                            if active_streak >= 3:
+                                            if active_streak >= 2 or (rms >= 260.0 and peak >= 850):
                                                 speech_started = True
                                                 self.speech_detected = True
-                                                self.speech_chunks = active_streak
+                                                self.speech_chunks = max(2, active_streak)
                                                 self._trim_start_idx = max(
                                                     0,
                                                     len(self._frames)
@@ -448,10 +440,10 @@ class Win32MicRecorder:
                                                 silence_streak = 0
                                         else:
                                             active_streak = 0
-                                            if rms >= 15.0 and rms < noise_floor * 1.8:
+                                            if rms >= 5.0 and rms < 110.0:
                                                 noise_floor = (
                                                     0.85 * noise_floor
-                                                    + 0.15 * max(70.0, min(300.0, rms))
+                                                    + 0.15 * max(25.0, min(105.0, rms))
                                                 )
                                         if (
                                             not speech_started
@@ -461,11 +453,12 @@ class Win32MicRecorder:
                                             self._recording = False
                                             break
                                 else:
-                                    cont_thresh = max(
-                                        250.0, min(900.0, noise_floor * 2.1)
-                                    )
-                                    cont_peak = max(900, int(noise_floor * 3.8))
-                                    if rms >= cont_thresh or peak >= cont_peak:
+                                    # Close-talk user speech continuation is >=185 RMS and >=600 peak.
+                                    # As soon as the user stops talking (<185 RMS or <600 peak), silence_streak
+                                    # increments on every 100ms chunk and stops recording after silence_delay_s.
+                                    cont_thresh = 185.0
+                                    cont_peak = 600
+                                    if rms >= cont_thresh and peak >= cont_peak:
                                         silence_streak = 0
                                         self.speech_chunks += 1
                                     else:
@@ -1666,6 +1659,7 @@ def bootstrap_bark_python(
 VK_LCONTROL = 0xA2
 VK_LWIN = 0x5B
 VK_SPACE = 0x20
+VK_ESCAPE = 0x1B
 
 _WISPR_ERROR_KEYS: tuple[str, ...] = (
     "TranscriptionError",
@@ -1953,14 +1947,19 @@ def dismiss_wispr_flow_if_active() -> bool:
         _user32.keybd_event(VK_ESCAPE, 0, 0, 0)
         time.sleep(0.03)
         _user32.keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.08)
+        still_active, _ = get_wispr_capture_state_and_peak()
+        if still_active:
+            trigger_wispr_flow_handsfree()
         return True
     except Exception:
         return False
 
 
 def get_wispr_latest_history_row() -> tuple[str, str, str]:
-    """Read the newest row from Wispr Flow's ``flow.sqlite`` ``History`` table.
+    """Read the newest completed non-empty row from Wispr Flow's ``flow.sqlite`` ``History`` table.
 
+    Filters out stuck NULL/empty rows so in-progress or aborted rows never freeze ``ts_before``.
     Returns ``(timestamp_str, transcript_text, status_str)``.
     """
     db_path = get_wispr_db_path()
@@ -1973,7 +1972,9 @@ def get_wispr_latest_history_row() -> tuple[str, str, str]:
         try:
             cur = con.cursor()
             cur.execute(
-                "SELECT timestamp, formattedText, asrText, status FROM History ORDER BY timestamp DESC LIMIT 1"
+                "SELECT timestamp, formattedText, asrText, status FROM History "
+                "WHERE coalesce(formattedText, asrText, '') != '' "
+                "ORDER BY timestamp DESC LIMIT 1"
             )
             row = cur.fetchone()
             if not row:
@@ -2090,8 +2091,9 @@ def transcribe_with_groq(
                 seen.add(t.lower())
                 vocab_terms.append(t)
     prompt_str = (
-        "Transcribe clearly with accurate punctuation and capitalization. "
-        + (f"Vocabulary: {', '.join(vocab_terms[:40])}." if vocab_terms else "")
+        "Transcribe English, Bengali (বাংলা), and Hindi (हिन्दी) clearly with accurate punctuation. "
+        "Keep English words in Latin script, Bengali in বাংলা script, and Hindi in हिन्दी script. "
+        + (f"Vocabulary: {', '.join(vocab_terms[:35])}." if vocab_terms else "")
     ).strip()
 
     models_to_try = [model] if model == "whisper-large-v3-turbo" else [model, "whisper-large-v3-turbo"]
@@ -2111,7 +2113,6 @@ def transcribe_with_groq(
         _add_field("model", cur_model)
         _add_field("temperature", "0")
         _add_field("response_format", "json")
-        _add_field("language", "en")
         if prompt_str:
             _add_field("prompt", prompt_str)
 
@@ -2205,7 +2206,11 @@ class BarkCleanController:
             ).start()
 
     def _wispr_watchdog_loop(self) -> None:
-        """Monitor Wispr Flow for (1) hands-free auto-stop on mic silence and (2) error auto-failover to Groq STT."""
+        """Monitor Wispr Flow strictly for error notifications when Audify is in standalone mode.
+
+        Manual Ctrl+Win or Ctrl+Win+Space sessions belong to regular Wispr Flow dictation
+        and are never intercepted or auto-stopped here.
+        """
         cfg_path = get_wispr_config_path()
         last_mtime = 0.0
         last_err_ts, _ = get_wispr_latest_error()
@@ -2214,98 +2219,12 @@ class BarkCleanController:
                 last_mtime = os.path.getmtime(cfg_path)
             except Exception:
                 pass
-
-        wispr_speech_started = False
-        wispr_active_ticks = 0
-        wispr_silence_since: float | None = None
-        wispr_session_start: float | None = None
-        ambient_peak = 0.012
         lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
 
         while True:
-            # Yield auto-stop control if --speak-and-listen holds audify_voiceloop.lock or Global\AudifyVoiceLoopActive
-            vl_mutex = _kernel32.OpenMutexW(0x00100000, False, "Global\\AudifyVoiceLoopActive")
-            if vl_mutex:
-                _kernel32.CloseHandle(vl_mutex)
-                wispr_session_start = None
-                wispr_speech_started = False
-                wispr_active_ticks = 0
-                wispr_silence_since = None
-                time.sleep(0.35)
-                continue
+            time.sleep(0.5)
             if os.path.exists(lock_file):
-                try:
-                    if (time.time() - os.path.getmtime(lock_file)) < 180.0:
-                        wispr_session_start = None
-                        wispr_speech_started = False
-                        wispr_active_ticks = 0
-                        wispr_silence_since = None
-                        time.sleep(0.35)
-                        continue
-                except Exception:
-                    pass
-
-            is_act, mic_peak = get_wispr_capture_state_and_peak()
-            if is_act:
-                if wispr_session_start is None:
-                    wispr_session_start = time.monotonic()
-                    wispr_speech_started = False
-                    wispr_active_ticks = 0
-                    wispr_silence_since = None
-                    ambient_peak = 0.012
-
-                # Ignore first 2.6s after cold Wispr Flow start so hardware AGC/NS convergence does not trigger speech onset
-                if (time.monotonic() - wispr_session_start) < 2.6:
-                    time.sleep(0.05)
-                    continue
-
-                # Skip auto-stop if the user is physically holding Left Ctrl + Left Win (push-to-talk)
-                ptt_held = bool(_user32.GetAsyncKeyState(VK_LCONTROL) & 0x8000) and bool(
-                    _user32.GetAsyncKeyState(VK_LWIN) & 0x8000
-                )
-                if not ptt_held:
-                    silence_delay_s = 2.0
-                    if self.daemon is not None:
-                        with self.daemon._config_lock:
-                            silence_delay_s = max(
-                                1.6,
-                                float(self.daemon.config.get("stt_silence_delay", 2.0)),
-                            )
-                    if not wispr_speech_started:
-                        onset_peak = max(0.038, min(0.12, ambient_peak * 2.8))
-                        if mic_peak >= onset_peak:
-                            wispr_active_ticks += 1
-                            if wispr_active_ticks >= 5:
-                                wispr_speech_started = True
-                                wispr_silence_since = None
-                        else:
-                            wispr_active_ticks = 0
-                            if mic_peak >= 0.002 and mic_peak < ambient_peak * 1.8:
-                                ambient_peak = 0.85 * ambient_peak + 0.15 * max(0.006, min(0.025, mic_peak))
-                    else:
-                        cont_peak = max(0.026, min(0.08, ambient_peak * 2.0))
-                        if mic_peak >= cont_peak:
-                            wispr_silence_since = None
-                        else:
-                            if wispr_silence_since is None:
-                                wispr_silence_since = time.monotonic()
-                            elif (time.monotonic() - wispr_silence_since) >= silence_delay_s:
-                                # User finished speaking and mic pitch/level dropped -> stop Wispr Flow!
-                                stop_wispr_flow_if_active()
-                                wispr_session_start = None
-                                wispr_speech_started = False
-                                wispr_active_ticks = 0
-                                wispr_silence_since = None
-                                time.sleep(0.35)
-                                continue
-                time.sleep(0.05)
-            else:
-                wispr_session_start = None
-                wispr_speech_started = False
-                wispr_active_ticks = 0
-                wispr_silence_since = None
-                time.sleep(0.35)
-
+                continue
             if not self.is_enabled or self.is_busy:
                 continue
             try:
@@ -2374,6 +2293,9 @@ class BarkCleanController:
 
         Returns the new state: ``"recording"``, ``"transcribing"``, ``"disabled"``, or ``"busy"``.
         """
+        lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
+        if os.path.exists(lock_file):
+            return "agent_handled"
         if not self.is_enabled:
             return "disabled"
 
@@ -2429,8 +2351,27 @@ class BarkCleanController:
                 cb(False, "Dictation cancelled.")
             except Exception:
                 pass
+        self._resume_media_if_standalone()
         print("[STT] Dictation/transcription cancelled via Escape.")
         return True
+
+    def _resume_media_if_standalone(self) -> None:
+        """Resume any external video/audio paused by standalone dictation once dictation ends."""
+        try:
+            lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
+            if os.path.exists(lock_file):
+                return
+            from audify.voice_loop import (
+                _find_audify_pids,
+                _resume_external_system_audio_if_paused_by_us,
+            )
+
+            self_pids = {os.getpid()} | _find_audify_pids() | get_wispr_flow_pids()
+            _resume_external_system_audio_if_paused_by_us(
+                self_pids, delay_before_s=0.5
+            )
+        except Exception:
+            pass
 
     def start_dictation(
         self, on_complete: Callable[[bool, str], None] | None = None
@@ -2451,6 +2392,16 @@ class BarkCleanController:
                     self.daemon._clip_listener.set_recording_escape_guard(True)
                 except Exception:
                     pass
+            try:
+                from audify.voice_loop import (
+                    _find_audify_pids,
+                    _pause_external_system_audio_if_playing,
+                )
+
+                self_pids = {os.getpid()} | _find_audify_pids() | get_wispr_flow_pids()
+                _pause_external_system_audio_if_playing(self_pids, wait_after_s=0.15)
+            except Exception:
+                pass
             self.recorder.start(
                 on_auto_stop=self._on_vad_auto_stop,
                 auto_stop_on_silence=True,
@@ -2493,6 +2444,7 @@ class BarkCleanController:
                     cb(False, "No speech detected.")
                 except Exception:
                     pass
+            self._resume_media_if_standalone()
 
     def stop_and_transcribe(
         self,
@@ -2569,6 +2521,7 @@ class BarkCleanController:
                             cb(ok, out_msg)
                         except Exception:
                             pass
+                    self._resume_media_if_standalone()
 
         threading.Thread(
             target=_worker, daemon=True, name="bark-transcribe"

@@ -606,13 +606,10 @@ def _run_settings_window(daemon: Any) -> None:
     for w in (skip_row, skip_text, skip_title, skip_desc):
         w.bind("<Button-1>", lambda e: skip_chk._on_click(None))
 
-    add_divider(sidebar, S(8), S(8))
-    section_caption("Dictation & System Tools")
-
-    stt_enabled_var = tk.BooleanVar(value=daemon.config.get("stt_enabled", True))
+    stt_enabled_var = tk.BooleanVar(value=False)
 
     def _sync_stt_controls_state() -> None:
-        stt_on = bool(daemon.config.get("stt_enabled", True))
+        stt_on = bool(daemon.config.get("stt_enabled", False))
         stt_obj = getattr(daemon, "stt", None)
         if not stt_on:
             dictate_btn.config(state="disabled", text="Dictation Disabled (Light Mode)")
@@ -630,12 +627,12 @@ def _run_settings_window(daemon: Any) -> None:
         if hasattr(daemon, "toggle_stt_enabled"):
             daemon.toggle_stt_enabled()
         else:
-            cur = bool(daemon.config.get("stt_enabled", True))
+            cur = bool(daemon.config.get("stt_enabled", False))
             daemon.config["stt_enabled"] = not cur
             save_config(daemon.config)
             if hasattr(daemon, "stt"):
                 daemon.stt.set_enabled(not cur)
-        now_on = bool(daemon.config.get("stt_enabled", True))
+        now_on = bool(daemon.config.get("stt_enabled", False))
         stt_enabled_var.set(now_on)
         _sync_stt_controls_state()
         p_now = get_palette(str(daemon.config.get("theme_mode", "system")))
@@ -649,7 +646,6 @@ def _run_settings_window(daemon: Any) -> None:
         )
 
     stt_row = tk.Frame(sidebar, bg=pal["card"], cursor="hand2")
-    stt_row.pack(fill=tk.X, pady=(0, S(8)))
     card_frames.append(stt_row)
     stt_chk = FluentToggle(
         stt_row,
@@ -684,7 +680,7 @@ def _run_settings_window(daemon: Any) -> None:
 
     tools_status_lbl = ttk.Label(
         sidebar,
-        text="Reset Bluetooth driver or Windows icon cache",
+        text="",
         style="CardSub.TLabel",
     )
 
@@ -746,7 +742,6 @@ def _run_settings_window(daemon: Any) -> None:
         reset_icon_cache(daemon=daemon, on_complete=_done)
 
     tools_row = tk.Frame(sidebar, bg=pal["card"])
-    tools_row.pack(fill=tk.X, pady=(0, S(6)))
     card_frames.append(tools_row)
     tools_row.grid_columnconfigure(0, weight=1, uniform="tools")
     tools_row.grid_columnconfigure(1, weight=1, uniform="tools")
@@ -781,7 +776,7 @@ def _run_settings_window(daemon: Any) -> None:
             def _ui_update() -> None:
                 try:
                     _sync_stt_controls_state()
-                    if not daemon.config.get("stt_enabled", True):
+                    if not daemon.config.get("stt_enabled", False):
                         return
                     p_cur = get_palette(str(daemon.config.get("theme_mode", "system")))
                     preview = msg if len(msg) <= 42 else msg[:39] + "..."
@@ -821,10 +816,8 @@ def _run_settings_window(daemon: Any) -> None:
         accent_hover=pal["accent_hover"],
         pal=pal,
     )
-    dictate_btn.pack(fill=tk.X, pady=(0, S(6)))
 
     delay_row = tk.Frame(sidebar, bg=pal["card"])
-    delay_row.pack(fill=tk.X, pady=(0, S(4)))
     card_frames.append(delay_row)
     ttk.Label(delay_row, text="Auto-stop silence", style="Field.TLabel").pack(
         side=tk.LEFT
@@ -855,7 +848,6 @@ def _run_settings_window(daemon: Any) -> None:
     delay_cb.bind("<<ComboboxSelected>>", on_delay_change)
 
     _sync_stt_controls_state()
-    tools_status_lbl.pack(anchor=tk.W)
 
     # Footer: customizable global shortcuts
     footer = tk.Frame(sidebar, bg=pal["card"])
@@ -1056,8 +1048,6 @@ def _run_settings_window(daemon: Any) -> None:
         )
         hotkey_badges[cfg_key] = badge
 
-    _make_hotkey_row("Dictate (Bark 3.0)", "dictation_hotkey", "double_lctrl", S(4))
-    _make_hotkey_row("Paste last dictation", "paste_last_hotkey", "ctrl+alt+v", S(4))
     _make_hotkey_row("Stop playback", "stop_hotkey", "ctrl+alt+s", S(2))
 
     # -----------------------------------------------------------------------
@@ -1090,14 +1080,13 @@ def _run_settings_window(daemon: Any) -> None:
     count_label = ttk.Label(count_border, style="Badge.TLabel")
     count_label.pack(padx=1, pady=1)
 
-    # Segmented mode switcher: TTS Pronunciation vs STT Vocabulary (Auto-Learn)
+    # Segmented mode switcher (hidden in TTS-only build)
     mode_bar = tk.Frame(
         dict_frame,
         bg=pal["card"],
         highlightthickness=1,
         highlightbackground=pal["border"],
     )
-    mode_bar.pack(fill=tk.X, pady=(0, S(10)))
     mode_tts_btn = tk.Label(
         mode_bar,
         text="TTS Pronunciation (Read Aloud)",

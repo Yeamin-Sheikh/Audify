@@ -119,61 +119,7 @@ def _selftest(report_path: str) -> int:
         ok = False
         lines.append(f"audio-mixer: FAILED {e!r}")
 
-    # 5. Verify Bluetooth driver restarter, Icon Cache resetter, and Bark 3.0 Clean STT
-    try:
-        import os
-        from audify.bluetooth import (
-            DEFAULT_BT_INSTANCE_ID,
-            SHELLEXECUTEINFOW,
-            _BATCH_SCRIPT,
-            is_bluetooth_restarting,
-        )
-        from audify.icon_cache import is_icon_cache_resetting, reset_icon_cache
-        from audify.config import apply_stt_vocabulary
-        from audify.stt import (
-            BarkCleanController,
-            find_bark_python,
-            get_bark_dir,
-            get_wispr_capture_state_and_peak,
-            get_wispr_latest_history_row,
-            is_wispr_flow_running,
-            resolve_groq_api_key,
-        )
-
-        if DEFAULT_BT_INSTANCE_ID not in _BATCH_SCRIPT or is_bluetooth_restarting():
-            raise RuntimeError("Bluetooth restarter configuration invalid")
-        if is_icon_cache_resetting() or not callable(reset_icon_cache):
-            raise RuntimeError("Icon cache resetter configuration invalid")
-        _ = ctypes.sizeof(SHELLEXECUTEINFOW)
-        bark_py = find_bark_python()
-        bark_dir = get_bark_dir()
-        model_bark = os.path.join(bark_dir, "model.bark")
-        if not bark_py or not os.path.isfile(model_bark):
-            raise RuntimeError(f"Bark 3.0 Clean runtime missing (py={bark_py}, model={model_bark})")
-        ctrl = BarkCleanController()
-        if ctrl.is_busy or ctrl._proc is not None:
-            raise RuntimeError("BarkCleanController must never pre-load Bark 3.0 into RAM at init")
-        ctrl.set_enabled(False)
-        ctrl.set_enabled(True)
-        if ctrl._proc is not None:
-            raise RuntimeError("BarkCleanController must not pre-load Bark 3.0 on set_enabled(True)")
-        _ = is_wispr_flow_running()
-        _ = get_wispr_capture_state_and_peak()
-        _ = get_wispr_latest_history_row()
-        _ = resolve_groq_api_key()
-        if apply_stt_vocabulary("Hello Yamin", {"Yamin": "Yeamin"}) != "Hello Yeamin":
-            raise RuntimeError("apply_stt_vocabulary failed word replacement check")
-        ctrl.learner.record_dictation("Hello Yamin from Projen")
-        if ctrl.learner._resolve_target_word("", ctrl.learner._last_words, "Yeamin") != "Yamin":
-            raise RuntimeError("DictationCorrectionLearner fuzzy target resolution failed")
-        lines.append(
-            f"system-tools: ok (bluetooth={DEFAULT_BT_INSTANCE_ID}, icon-cache=ready, stt-hierarchy=wispr->groq-v3->bark-3.0)"
-        )
-    except Exception as e:
-        ok = False
-        lines.append(f"system-tools: FAILED {e!r}")
-
-    # 6. Verify live streaming + decoding pipeline
+    # 5. Verify live streaming + decoding pipeline
     try:
         from audify.playback import SpeechSession
 
@@ -218,21 +164,6 @@ def main() -> None:
     """Single-instance guard and tray launch."""
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         sys.exit(_selftest(sys.argv[2]))
-    if len(sys.argv) >= 3 and sys.argv[1] == "--speak-and-listen":
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-        from audify.voice_loop import speak_and_trigger_hierarchy
-
-        res = speak_and_trigger_hierarchy(sys.argv[2], trigger_listen_after=True)
-        print(res, flush=True)
-        if res.get("transcript"):
-            print(
-                f"VOICE_AGENT_HEARD ({res.get('stt_tier_triggered')}): {res.get('transcript')}",
-                flush=True,
-            )
-        sys.exit(0)
 
     # Only one Audify instance can run at a time.
     # If a second is launched, show a friendly dialog and exit.

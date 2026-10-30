@@ -342,37 +342,19 @@ class TTSDaemon:
             )
         )
 
-        # Parse dictation hotkey (default double_lctrl) into double-tap or Win32 modifiers + VK code
+        # Standalone Audify is strictly a Text-to-Speech reader; STT hotkeys are disabled.
+        self.config["stt_enabled"] = False
         dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_lctrl"))
-        self._dictation_double_tap = DoubleTapDetector(
-            is_double_tap_hotkey(dictation_hotkey_str)
-        )
-        self._dictation_hotkey_parsed = (
-            None
-            if self._dictation_double_tap.target_vk is not None
-            else (
-                parse_win32_hotkey(dictation_hotkey_str)
-                or (MOD_CONTROL | MOD_ALT, ord("D"))
-            )
-        )
+        self._dictation_double_tap = DoubleTapDetector(None)
+        self._dictation_hotkey_parsed = None
         self._dictation_combo_was_down: bool = False
 
-        # Parse paste-last-dictation hotkey (default ctrl+alt+v) into Win32 modifiers + VK code
         paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "ctrl+alt+v"))
-        self._paste_last_double_tap = DoubleTapDetector(
-            is_double_tap_hotkey(paste_last_hotkey_str)
-        )
-        self._paste_last_hotkey_parsed = (
-            None
-            if self._paste_last_double_tap.target_vk is not None
-            else (
-                parse_win32_hotkey(paste_last_hotkey_str)
-                or (MOD_CONTROL | MOD_ALT, ord("V"))
-            )
-        )
+        self._paste_last_double_tap = DoubleTapDetector(None)
+        self._paste_last_hotkey_parsed = None
         self._paste_last_combo_was_down: bool = False
 
-        # Speech-to-Text controller powered by Underdog Bark 3.0 Clean
+        # Speech-to-Text controller (disabled in standalone TTS mode)
         self.stt = BarkCleanController(daemon=self)
 
         # Persistent event loop for TTS
@@ -382,7 +364,7 @@ class TTSDaemon:
         # Pre-warm Sec-MS-GEC v2 token, shared TCPConnector, and DNS cache
         prewarm_edge_tts(self._loop)
 
-        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop, dictation & paste-last
+        # Event-driven clipboard listener + native Win32 RegisterHotKey for stop playback
         self._clip_listener = ClipboardListener(
             self._on_clipboard_change,
             stop_hotkey=stop_hotkey_str,
@@ -392,7 +374,7 @@ class TTSDaemon:
             paste_last_hotkey=paste_last_hotkey_str,
             on_paste_last_hotkey=self.paste_last_dictation,
             on_escape_hotkey=self.stt.on_escape_pressed,
-            stt_enabled=bool(self.config.get("stt_enabled", True)),
+            stt_enabled=False,
         )
 
         # Tray icon (injected later)
@@ -937,7 +919,7 @@ class TTSDaemon:
 
     # -- TTS generation ----------------------------------------------------
 
-    def _split_text(self, text: str, first_chunk_max: int = 80) -> list[str]:
+    def _split_text(self, text: str, first_chunk_max: int = 800) -> list[str]:
         """
         Split text into natural paragraph and sentence-based chunks.
 

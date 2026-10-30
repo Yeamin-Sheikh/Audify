@@ -268,6 +268,12 @@ class DoubleTapDetector:
             VK_RMENU,
             VK_LSHIFT,
             VK_RSHIFT,
+            0x5B,  # VK_LWIN
+            0x5C,  # VK_RWIN
+            0x20,  # VK_SPACE
+            0x43,  # 'C'
+            0x56,  # 'V'
+            0x58,  # 'X'
         ):
             if m_vk != vk and is_vk_down(m_vk):
                 self.taint()

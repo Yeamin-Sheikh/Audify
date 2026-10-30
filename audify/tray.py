@@ -500,33 +500,6 @@ def setup_tray() -> None:
                 enabled=lambda i: bool(daemon.last_spoken),
             ),
             item("Read Clipboard Now", on_read_clipboard),
-            item(
-                lambda text: (
-                    "Dictation Disabled (Light Mode)\tOff"
-                    if not daemon.config.get("stt_enabled", True)
-                    else (
-                        f"{'Stop & Transcribe' if daemon.stt.is_recording else ('Transcribing...' if daemon.stt.is_transcribing else 'Start Dictation (Bark 3.0)')}"
-                        f"\t{_dictation_hotkey_display_name(daemon)}"
-                    )
-                ),
-                on_toggle_dictation,
-                enabled=lambda i: bool(
-                    daemon.config.get("stt_enabled", True)
-                    and not daemon.stt.is_transcribing
-                ),
-            ),
-            item(
-                lambda text: f"Paste Last Dictation\t{_paste_last_hotkey_display_name(daemon)}",
-                on_paste_last_dictation,
-                enabled=lambda i: bool(
-                    daemon.config.get("stt_enabled", True) and daemon.stt.last_dictated
-                ),
-            ),
-            item(
-                lambda text: f"Dictation Auto-Stop Delay\t{_silence_delay_display_name(daemon)}",
-                Menu(*silence_delay_menu_items),
-                enabled=lambda i: bool(daemon.config.get("stt_enabled", True)),
-            ),
             Menu.SEPARATOR,
             # Voice settings with the current value right-aligned
             item(
@@ -547,11 +520,6 @@ def setup_tray() -> None:
                 checked=lambda i: daemon.config.get("read_on_copy", True),
             ),
             item(
-                "Speech-to-Text (Dictation)",
-                on_toggle_stt_enabled,
-                checked=lambda i: daemon.config.get("stt_enabled", True),
-            ),
-            item(
                 "Skip Code Blocks",
                 on_toggle_skip_code,
                 checked=lambda i: daemon.config.get("skip_code_blocks", True),
@@ -561,16 +529,6 @@ def setup_tray() -> None:
                 Menu(*theme_menu_items),
             ),
             Menu.SEPARATOR,
-            item(
-                lambda text: "Restarting Bluetooth..." if is_bluetooth_restarting() else "Restart Bluetooth",
-                on_restart_bluetooth,
-                enabled=lambda i: not is_bluetooth_restarting(),
-            ),
-            item(
-                lambda text: "Resetting Icon Cache..." if is_icon_cache_resetting() else "Reset Icon Cache",
-                on_reset_icon_cache,
-                enabled=lambda i: not is_icon_cache_resetting(),
-            ),
             item("Settings...", on_open_settings),
             item("Quit Audify", on_exit),
         ),

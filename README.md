@@ -203,6 +203,22 @@ clean_text.py                Markdown to speech text, pronunciation matching
 
 ## Changelog
 
+### v2.9.22
+
+- **Voice Agent Capability & Reliability Upgrade**:
+  - **Out-of-Job WMI Application Launcher & Fast-Path Engine (`audify/agent_actions.py`)**: added `launch_app_detached`, `resolve_application_target`, `close_application`, `adjust_system_volume`, and `try_execute_fast_voice_command` plus CLI flag `--launch-app <name>`. Spawns desktop apps via WMI `Win32_Process.Create` (`WmiPrvSE.exe`) in Interactive Session `1` outside any terminal Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) so launched applications survive permanently.
+  - **Instant Barge-In & Escape Interruption (`audify/voice_loop.py`)**: polling `DoubleTapDetector(VK_LCONTROL)` / `DoubleTapDetector(VK_RCONTROL)` and `VK_ESCAPE` during `SpeechSession` playback lets you double-tap `Ctrl` while the agent is speaking to immediately cut off speech and open the microphone, or press `Escape` to stop speech and enter standby.
+  - **Focus-Safe Paste Shield & Stuck-Row SQLite Filtering (`audify/voice_loop.py`, `audify/stt.py`)**: added `_FocusPasteShield` to park focus on `Shell_TrayWnd` and restore your clipboard when Wispr Flow stops during voice agent turns so raw text is never pasted into focused input boxes, and updated `get_wispr_latest_history_row` to filter out stuck `NULL`/empty rows in `flow.sqlite`.
+  - **Phonetic App Vocabulary & Enriched Desktop Telemetry (`audify/config.py`, `audify/voice_loop.py`)**: expanded `DEFAULT_STT_VOCABULARY` (`"audit file"` / `"Portify"` / `"AutoFile"` -> `"Audify"`), applied `apply_stt_vocabulary` to Tier 1 transcripts, wired `DictationVisualizerHUD` for non-Wispr turns, and added `open_windows`, `clipboard_preview`, and `fast_action` to voice agent outputs.
+
+### v2.9.21
+
+- **Right-click Speech-to-Text Toggle & Complete `Double Left Ctrl` Unbind**:
+  - Added a prominent `Enable Speech-to-Text (Double Left Ctrl)` checkable toggle in the right-click tray menu (`audify/tray.py`) directly inside the dictation section.
+  - Updated `TTSDaemon.__init__`, `set_hotkey`, `set_stt_enabled`, and `_poll_input_state_loop` (`audify/engine.py`) so disabling Speech-to-Text (`stt_enabled = False`) sets `DoubleTapDetector.set_target_vk(None)` for both dictation and paste-last double-tap triggers, completely disabling `Double Left Ctrl` polling in `Audify.exe`. Also suppresses `Double Left Ctrl` in `Audify.exe` whenever `audify_voiceloop.lock` is active so `Audify.exe` and the live voice agent never conflict.
+- **Voice Agent Context-Aware Listening, External Media Auto-Pause/Resume, and Close-Talk Isolation**:
+  - Added `_expects_user_reply`, `_is_external_media_audible`, `_pause_external_system_audio_if_playing`, `_resume_external_system_audio_if_paused_by_us`, `_filter_primary_user_speech`, and `_capture_live_desktop_context` in `audify/voice_loop.py`.
+
 ### v2.9.20
 
 - **Wispr Flow Auto-Stop on Silence & Zero-Focus Immediate Transcript Delivery**:
