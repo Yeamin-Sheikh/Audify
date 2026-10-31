@@ -366,12 +366,15 @@ class Win32MicRecorder:
         headers = [WAVEHDR() for _ in range(NUM_BUFFERS)]
         hdr_size = ctypes.sizeof(WAVEHDR)
 
-        # Adaptive VAD state calibrated for real-time close-talk speech vs silence
+        # Adaptive VAD state calibrated for real-time close-talk speech vs ambient room noise
         noise_floor = 60.0
+        noise_peak = 250.0
+        noise_seeded = False
         ignore_chunks = 2
         speech_started = False
         active_streak = 0
         silence_streak = 0
+        resume_streak = 0
         chunk_count = 0
         auto_stop_reason: str | None = None
 
@@ -398,9 +401,12 @@ class Win32MicRecorder:
                         speech_started = False
                         active_streak = 0
                         silence_streak = 0
+                        resume_streak = 0
                         chunk_count = 0
                         ignore_chunks = 2
                         noise_floor = 60.0
+                        noise_peak = 250.0
+                        noise_seeded = False
 
                 any_done = False
                 for i in range(NUM_BUFFERS):
@@ -412,76 +418,162 @@ class Win32MicRecorder:
                             self._frames.append(raw_chunk)
                             chunk_count += 1
                             rms, peak = _frame_rms_and_peak(raw_chunk)
-                            norm_lvl = min(1.0, max(0.05, (rms - noise_floor * 0.85) / 2200.0))
-                            self.current_level = 0.45 * self.current_level + 0.55 * norm_lvl
-                            bars = list(self.level_bars[1:]) + [self.current_level]
-                            self.level_bars = bars
 
-                            if self._vad_enabled:
-                                # Ignore only the first 2 chunks (200ms) for waveInStart hardware pop.
-                                # Track chunk_count (all 100ms chunks, including silent ones) so silence_streak
-                                # increments immediately as soon as the user stops speaking.
-                                if not speech_started:
-                                    if chunk_count > ignore_chunks:
-                                        onset_thresh = 135.0
-                                        onset_peak = 420
-                                        if rms >= onset_thresh and peak >= onset_peak:
-                                            active_streak += 1
-                                            if active_streak >= 2 or (rms >= 260.0 and peak >= 850):
-                                                speech_started = True
-                                                self.speech_detected = True
-                                                self.speech_chunks = max(2, active_streak)
-                                                self._trim_start_idx = max(
-                                                    0,
-                                                    len(self._frames)
-                                                    - active_streak
-                                                    - VAD_PRE_ROLL_CHUNKS,
-                                                )
-                                                silence_streak = 0
-                                        else:
-                                            active_streak = 0
-                                            if rms >= 5.0 and rms < 110.0:
-                                                noise_floor = (
-                                                    0.85 * noise_floor
-                                                    + 0.15 * max(25.0, min(105.0, rms))
-                                                )
-                                        if (
-                                            not speech_started
-                                            and chunk_count >= no_speech_chunks
-                                        ):
-                                            auto_stop_reason = "no_speech"
-                                            self._recording = False
-                                            break
-                                else:
-                                    # Proper VAD hysteresis: continuation threshold must be LOWER than onset
-                                    # threshold (135 RMS / 420 peak) because human voice drops in volume/pitch
-                                    # mid-sentence and Windows AGC lowers mic gain during long tangents.
-                                    cont_thresh = max(75.0, min(110.0, noise_floor * 1.45))
-                                    cont_peak = 240
-                                    if rms >= cont_thresh or peak >= cont_peak:
-                                        silence_streak = 0
-                                        self.speech_chunks += 1
+                            # Windows waveIn drivers often emit digital-zero chunks (rms < 5.0)
+                            # for the first 300-500ms while warming up the capture endpoint.
+                            if chunk_count <= 8 and rms < 5.0:
+                                self.current_level = 0.05
+                                self.level_bars = list(self.level_bars[1:]) + [0.05]
+                            else:
+                                if not noise_seeded:
+                                    noise_seeded = True
+                                    if rms < 950.0:
+                                        noise_floor = max(60.0, min(650.0, rms))
+                                        noise_peak = max(250.0, min(2400.0, float(peak)))
                                     else:
-                                        silence_streak += 1
-                                        if self.speech_chunks >= 45:
-                                            req_silence = max(end_silence_chunks, 32)
-                                        elif self.speech_chunks >= 20:
-                                            req_silence = max(end_silence_chunks, 24)
-                                        else:
-                                            req_silence = end_silence_chunks
-                                        if silence_streak >= req_silence:
-                                            # Keep 400ms of trailing silence and trim the rest
-                                            trim_off = (
-                                                silence_streak - VAD_TRAILING_KEEP_CHUNKS
+                                        noise_floor = 350.0
+                                        noise_peak = 1200.0
+
+                                norm_lvl = min(
+                                    1.0,
+                                    max(0.05, (rms - noise_floor * 1.15) / 2200.0),
+                                )
+                                self.current_level = (
+                                    0.45 * self.current_level + 0.55 * norm_lvl
+                                )
+                                bars = list(self.level_bars[1:]) + [self.current_level]
+                                self.level_bars = bars
+
+                                if self._vad_enabled:
+                                    if not speech_started:
+                                        if chunk_count > ignore_chunks:
+                                            onset_thresh = max(
+                                                160.0,
+                                                noise_floor * 2.15,
+                                                noise_floor + 380.0,
                                             )
-                                            if trim_off > 0:
-                                                self._trim_end_idx = max(
-                                                    self._trim_start_idx + 1,
-                                                    len(self._frames) - trim_off,
+                                            onset_peak = max(
+                                                600,
+                                                int(noise_peak * 1.95),
+                                                int(noise_peak + 1050),
+                                            )
+                                            if rms >= onset_thresh and peak >= onset_peak:
+                                                active_streak += 1
+                                                if active_streak >= 2 or (
+                                                    rms >= onset_thresh * 1.35
+                                                    and peak >= int(onset_peak * 1.35)
+                                                ):
+                                                    speech_started = True
+                                                    self.speech_detected = True
+                                                    self.speech_chunks = max(
+                                                        2, active_streak
+                                                    )
+                                                    self._trim_start_idx = max(
+                                                        0,
+                                                        len(self._frames)
+                                                        - active_streak
+                                                        - VAD_PRE_ROLL_CHUNKS,
+                                                    )
+                                                    silence_streak = 0
+                                                    resume_streak = 0
+                                            else:
+                                                active_streak = 0
+                                                if rms >= 5.0 and rms < onset_thresh * 0.85:
+                                                    noise_floor = (
+                                                        0.82 * noise_floor
+                                                        + 0.18 * max(40.0, min(680.0, rms))
+                                                    )
+                                                    noise_peak = (
+                                                        0.82 * noise_peak
+                                                        + 0.18
+                                                        * max(
+                                                            200.0,
+                                                            min(2500.0, float(peak)),
+                                                        )
+                                                    )
+                                            if (
+                                                not speech_started
+                                                and chunk_count >= no_speech_chunks
+                                            ):
+                                                auto_stop_reason = "no_speech"
+                                                self._recording = False
+                                                break
+                                    else:
+                                        # Continuation threshold sits cleanly above the live ambient room noise floor
+                                        # so silence_streak increments immediately when the user stops speaking.
+                                        cont_thresh = max(
+                                            135.0,
+                                            noise_floor * 1.65,
+                                            noise_floor + 240.0,
+                                        )
+                                        cont_peak = max(
+                                            480,
+                                            int(noise_peak * 1.50),
+                                            int(noise_peak + 650),
+                                        )
+                                        strong_thresh = max(
+                                            220.0,
+                                            noise_floor * 2.10,
+                                            noise_floor + 360.0,
+                                        )
+                                        strong_peak = max(
+                                            700,
+                                            int(noise_peak * 1.85),
+                                            int(noise_peak + 950),
+                                        )
+                                        is_voiced = (
+                                            rms >= cont_thresh and peak >= cont_peak
+                                        )
+                                        is_strong_voice = (
+                                            rms >= strong_thresh and peak >= strong_peak
+                                        )
+                                        if is_voiced:
+                                            if silence_streak == 0 or is_strong_voice:
+                                                silence_streak = 0
+                                                resume_streak = 0
+                                                self.speech_chunks += 1
+                                            else:
+                                                resume_streak += 1
+                                                if resume_streak >= 2:
+                                                    silence_streak = 0
+                                                    resume_streak = 0
+                                                    self.speech_chunks += 2
+                                        else:
+                                            resume_streak = 0
+                                            silence_streak += 1
+                                            if rms >= 5.0 and rms < cont_thresh * 0.85:
+                                                noise_floor = (
+                                                    0.90 * noise_floor
+                                                    + 0.10 * max(40.0, min(680.0, rms))
                                                 )
-                                            auto_stop_reason = "speech_ended"
-                                            self._recording = False
-                                            break
+                                                noise_peak = (
+                                                    0.90 * noise_peak
+                                                    + 0.10
+                                                    * max(200.0, min(2500.0, float(peak)))
+                                                )
+                                            if self.speech_chunks >= 35:
+                                                req_silence = max(
+                                                    end_silence_chunks, 18
+                                                )  # 1.8s on long tangents
+                                            elif self.speech_chunks >= 18:
+                                                req_silence = max(
+                                                    end_silence_chunks, 15
+                                                )  # 1.5s on multi-clause turns
+                                            else:
+                                                req_silence = end_silence_chunks
+                                            if silence_streak >= req_silence:
+                                                # Keep 400ms of trailing silence and trim the rest
+                                                trim_off = (
+                                                    silence_streak - VAD_TRAILING_KEEP_CHUNKS
+                                                )
+                                                if trim_off > 0:
+                                                    self._trim_end_idx = max(
+                                                        self._trim_start_idx + 1,
+                                                        len(self._frames) - trim_off,
+                                                    )
+                                                auto_stop_reason = "speech_ended"
+                                                self._recording = False
+                                                break
 
                         headers[i].dwBytesRecorded = 0
                         headers[i].dwFlags &= ~WHDR_DONE
