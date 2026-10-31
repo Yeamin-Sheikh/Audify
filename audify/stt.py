@@ -459,15 +459,10 @@ class Win32MicRecorder:
                                             )
                                             if rms >= onset_thresh and peak >= onset_peak:
                                                 active_streak += 1
-                                                if active_streak >= 2 or (
-                                                    rms >= onset_thresh * 1.35
-                                                    and peak >= int(onset_peak * 1.35)
-                                                ):
+                                                if active_streak >= 3:
                                                     speech_started = True
                                                     self.speech_detected = True
-                                                    self.speech_chunks = max(
-                                                        2, active_streak
-                                                    )
+                                                    self.speech_chunks = active_streak
                                                     self._trim_start_idx = max(
                                                         0,
                                                         len(self._frames)
@@ -478,6 +473,11 @@ class Win32MicRecorder:
                                                     resume_streak = 0
                                             else:
                                                 active_streak = 0
+                                                # Keep a bounded rolling pre-roll window while waiting for the user
+                                                # to start speaking so the mic can stay open indefinitely without RAM growth.
+                                                max_preroll = VAD_PRE_ROLL_CHUNKS + 8
+                                                if len(self._frames) > max_preroll:
+                                                    del self._frames[:-max_preroll]
                                                 if rms >= 5.0 and rms < onset_thresh * 0.85:
                                                     noise_floor = (
                                                         0.82 * noise_floor
@@ -491,13 +491,6 @@ class Win32MicRecorder:
                                                             min(2500.0, float(peak)),
                                                         )
                                                     )
-                                            if (
-                                                not speech_started
-                                                and chunk_count >= no_speech_chunks
-                                            ):
-                                                auto_stop_reason = "no_speech"
-                                                self._recording = False
-                                                break
                                     else:
                                         # Continuation threshold sits cleanly above the live ambient room noise floor
                                         # so silence_streak increments immediately when the user stops speaking.
@@ -562,18 +555,33 @@ class Win32MicRecorder:
                                             else:
                                                 req_silence = end_silence_chunks
                                             if silence_streak >= req_silence:
-                                                # Keep 400ms of trailing silence and trim the rest
-                                                trim_off = (
-                                                    silence_streak - VAD_TRAILING_KEEP_CHUNKS
-                                                )
-                                                if trim_off > 0:
-                                                    self._trim_end_idx = max(
-                                                        self._trim_start_idx + 1,
-                                                        len(self._frames) - trim_off,
+                                                # If total voiced audio was under 600ms (< 6 chunks), it was just a
+                                                # brief click, cough, or breath before the user started speaking;
+                                                # reset to waiting state instead of stopping the mic!
+                                                if self.speech_chunks < 6:
+                                                    speech_started = False
+                                                    self.speech_detected = False
+                                                    self.speech_chunks = 0
+                                                    active_streak = 0
+                                                    silence_streak = 0
+                                                    resume_streak = 0
+                                                    max_preroll = VAD_PRE_ROLL_CHUNKS + 8
+                                                    if len(self._frames) > max_preroll:
+                                                        del self._frames[:-max_preroll]
+                                                    self._trim_start_idx = 0
+                                                else:
+                                                    # Keep 400ms of trailing silence and trim the rest
+                                                    trim_off = (
+                                                        silence_streak - VAD_TRAILING_KEEP_CHUNKS
                                                     )
-                                                auto_stop_reason = "speech_ended"
-                                                self._recording = False
-                                                break
+                                                    if trim_off > 0:
+                                                        self._trim_end_idx = max(
+                                                            self._trim_start_idx + 1,
+                                                            len(self._frames) - trim_off,
+                                                        )
+                                                    auto_stop_reason = "speech_ended"
+                                                    self._recording = False
+                                                    break
 
                         headers[i].dwBytesRecorded = 0
                         headers[i].dwFlags &= ~WHDR_DONE
