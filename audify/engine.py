@@ -342,19 +342,30 @@ class TTSDaemon:
             )
         )
 
-        # Standalone Audify is strictly a Text-to-Speech reader; STT hotkeys are disabled.
-        self.config["stt_enabled"] = False
-        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_lctrl"))
-        self._dictation_double_tap = DoubleTapDetector(None)
-        self._dictation_hotkey_parsed = None
+        stt_enabled_cfg = bool(self.config.get("stt_enabled", True))
+        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_rctrl"))
+        self._dictation_double_tap = DoubleTapDetector(
+            is_double_tap_hotkey(dictation_hotkey_str) if stt_enabled_cfg else None
+        )
+        self._dictation_hotkey_parsed = (
+            None
+            if (not stt_enabled_cfg or self._dictation_double_tap.target_vk is not None)
+            else parse_win32_hotkey(dictation_hotkey_str)
+        )
         self._dictation_combo_was_down: bool = False
 
         paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "ctrl+alt+v"))
-        self._paste_last_double_tap = DoubleTapDetector(None)
-        self._paste_last_hotkey_parsed = None
+        self._paste_last_double_tap = DoubleTapDetector(
+            is_double_tap_hotkey(paste_last_hotkey_str) if stt_enabled_cfg else None
+        )
+        self._paste_last_hotkey_parsed = (
+            None
+            if (not stt_enabled_cfg or self._paste_last_double_tap.target_vk is not None)
+            else parse_win32_hotkey(paste_last_hotkey_str)
+        )
         self._paste_last_combo_was_down: bool = False
 
-        # Speech-to-Text controller (disabled in standalone TTS mode)
+        # Speech-to-Text controller
         self.stt = BarkCleanController(daemon=self)
 
         # Persistent event loop for TTS
@@ -374,7 +385,7 @@ class TTSDaemon:
             paste_last_hotkey=paste_last_hotkey_str,
             on_paste_last_hotkey=self.paste_last_dictation,
             on_escape_hotkey=self.stt.on_escape_pressed,
-            stt_enabled=False,
+            stt_enabled=stt_enabled_cfg,
         )
 
         # Tray icon (injected later)

@@ -335,7 +335,7 @@ class Win32MicRecorder:
         silence_delay_s: float = 1.0,
         no_speech_timeout_s: float = 8.0,
     ) -> None:
-        end_silence_chunks = max(4, min(40, int(round(float(silence_delay_s) * 10.0))))
+        end_silence_chunks = max(4, min(80, int(round(float(silence_delay_s) * 10.0))))
         no_speech_chunks = max(30, int(round(float(no_speech_timeout_s) * 10.0)))
         wfx = WAVEFORMATEX()
         wfx.wFormatTag = WAVE_FORMAT_PCM
@@ -390,7 +390,7 @@ class Win32MicRecorder:
                     with self._lock:
                         self._vad_reset_requested = False
                         end_silence_chunks = max(
-                            4, min(40, int(round(float(self._silence_delay_s) * 10.0)))
+                            4, min(80, int(round(float(self._silence_delay_s) * 10.0)))
                         )
                         no_speech_chunks = max(
                             30, int(round(float(self._no_speech_timeout_s) * 10.0))
@@ -453,17 +453,23 @@ class Win32MicRecorder:
                                             self._recording = False
                                             break
                                 else:
-                                    # Close-talk user speech continuation is >=185 RMS and >=600 peak.
-                                    # As soon as the user stops talking (<185 RMS or <600 peak), silence_streak
-                                    # increments on every 100ms chunk and stops recording after silence_delay_s.
-                                    cont_thresh = 185.0
-                                    cont_peak = 600
-                                    if rms >= cont_thresh and peak >= cont_peak:
+                                    # Proper VAD hysteresis: continuation threshold must be LOWER than onset
+                                    # threshold (135 RMS / 420 peak) because human voice drops in volume/pitch
+                                    # mid-sentence and Windows AGC lowers mic gain during long tangents.
+                                    cont_thresh = max(75.0, min(110.0, noise_floor * 1.45))
+                                    cont_peak = 240
+                                    if rms >= cont_thresh or peak >= cont_peak:
                                         silence_streak = 0
                                         self.speech_chunks += 1
                                     else:
                                         silence_streak += 1
-                                        if silence_streak >= end_silence_chunks:
+                                        if self.speech_chunks >= 45:
+                                            req_silence = max(end_silence_chunks, 32)
+                                        elif self.speech_chunks >= 20:
+                                            req_silence = max(end_silence_chunks, 24)
+                                        else:
+                                            req_silence = end_silence_chunks
+                                        if silence_streak >= req_silence:
                                             # Keep 400ms of trailing silence and trim the rest
                                             trim_off = (
                                                 silence_streak - VAD_TRAILING_KEEP_CHUNKS

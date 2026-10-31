@@ -213,10 +213,10 @@ def format_hotkey_label(hotkey_str: str) -> str:
 
 
 class DoubleTapDetector:
-    """Detects a clean double-tap of a single modifier key (such as Left Ctrl) via Win32 state."""
+    """Detects a clean double-tap of a single modifier key (such as Left or Right Ctrl) via Win32 state."""
 
-    MAX_HOLD_S = 0.32
-    MAX_GAP_S = 0.38
+    MAX_HOLD_S = 0.40
+    MAX_GAP_S = 0.45
 
     def __init__(self, target_vk: int | None = VK_LCONTROL) -> None:
         self.target_vk: int | None = target_vk
@@ -224,9 +224,20 @@ class DoubleTapDetector:
         self._down_time: float = 0.0
         self._tainted: bool = False
         self._first_tap_up_time: float = 0.0
+        # Flush any stale 0x0001 bit from before initialization
+        if target_vk is not None:
+            try:
+                user32.GetAsyncKeyState(target_vk)
+            except Exception:
+                pass
 
     def set_target_vk(self, target_vk: int | None) -> None:
         self.target_vk = target_vk
+        if target_vk is not None:
+            try:
+                user32.GetAsyncKeyState(target_vk)
+            except Exception:
+                pass
         self.reset()
 
     def reset(self) -> None:
@@ -244,10 +255,10 @@ class DoubleTapDetector:
         if self.target_vk is None:
             return
         allowed = {
-            VK_LCONTROL: ("left ctrl", "ctrl"),
-            VK_RCONTROL: ("right ctrl", "ctrl"),
-            VK_LMENU: ("left alt", "alt"),
-            VK_LSHIFT: ("left shift", "shift"),
+            VK_LCONTROL: ("left ctrl", "ctrl", "control_l"),
+            VK_RCONTROL: ("right ctrl", "ctrl", "control_r"),
+            VK_LMENU: ("left alt", "alt", "alt_l"),
+            VK_LSHIFT: ("left shift", "shift", "shift_l"),
         }.get(self.target_vk, ())
         if key_name not in allowed:
             self.taint()
@@ -259,25 +270,28 @@ class DoubleTapDetector:
             return False
 
         now = time.monotonic()
-        down = is_vk_down(vk)
+        raw_state = user32.GetAsyncKeyState(vk)
+        down = bool(raw_state & 0x8000)
+        pressed_edge = bool(raw_state & 0x0001)
 
-        for m_vk in (
-            VK_LCONTROL,
-            VK_RCONTROL,
-            VK_LMENU,
-            VK_RMENU,
-            VK_LSHIFT,
-            VK_RSHIFT,
-            0x5B,  # VK_LWIN
-            0x5C,  # VK_RWIN
-            0x20,  # VK_SPACE
-            0x43,  # 'C'
-            0x56,  # 'V'
-            0x58,  # 'X'
-        ):
-            if m_vk != vk and is_vk_down(m_vk):
-                self.taint()
-                break
+        if down or pressed_edge or self._was_down or self._first_tap_up_time > 0.0:
+            for m_vk in (
+                VK_LCONTROL,
+                VK_RCONTROL,
+                VK_LMENU,
+                VK_RMENU,
+                VK_LSHIFT,
+                VK_RSHIFT,
+                0x5B,  # VK_LWIN
+                0x5C,  # VK_RWIN
+                0x20,  # VK_SPACE
+                0x43,  # 'C'
+                0x56,  # 'V'
+                0x58,  # 'X'
+            ):
+                if m_vk != vk and is_vk_down(m_vk):
+                    self.taint()
+                    break
 
         if down:
             if not self._was_down:
@@ -289,6 +303,14 @@ class DoubleTapDetector:
                     and (now - self._first_tap_up_time) > self.MAX_GAP_S
                 ):
                     self._first_tap_up_time = 0.0
+            elif pressed_edge:
+                # Key was released and re-pressed within a single 15ms poll interval
+                hold_dur = now - self._down_time
+                if not self._tainted and hold_dur <= self.MAX_HOLD_S:
+                    self._first_tap_up_time = now
+                    self._down_time = now
+                else:
+                    self.taint()
             else:
                 if (now - self._down_time) > self.MAX_HOLD_S:
                     self.taint()
@@ -309,6 +331,21 @@ class DoubleTapDetector:
                 self._first_tap_up_time = 0.0
                 return True
 
+            self._first_tap_up_time = now
+            return False
+
+        if pressed_edge:
+            # Ultra-fast tap (<15ms hold) completed entirely between two polls
+            if self._tainted:
+                self._tainted = False
+                self._first_tap_up_time = 0.0
+                return False
+            if (
+                self._first_tap_up_time
+                and (now - self._first_tap_up_time) <= self.MAX_GAP_S
+            ):
+                self._first_tap_up_time = 0.0
+                return True
             self._first_tap_up_time = now
             return False
 
