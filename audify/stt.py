@@ -402,11 +402,11 @@ class Win32MicRecorder:
                         active_streak = 0
                         silence_streak = 0
                         resume_streak = 0
-                        chunk_count = 0
-                        ignore_chunks = 2
-                        noise_floor = 60.0
-                        noise_peak = 250.0
-                        noise_seeded = False
+                        chunk_count = 10
+                        ignore_chunks = 0
+                        noise_floor = 420.0
+                        noise_peak = 1450.0
+                        noise_seeded = True
 
                 any_done = False
                 for i in range(NUM_BUFFERS):
@@ -427,70 +427,73 @@ class Win32MicRecorder:
                             else:
                                 if not noise_seeded:
                                     noise_seeded = True
-                                    if rms < 950.0:
-                                        noise_floor = max(60.0, min(650.0, rms))
-                                        noise_peak = max(250.0, min(2400.0, float(peak)))
+                                    # Never seed noise_floor above ambient room level (~445 RMS / ~1500 peak),
+                                    # even if the user is already speaking on the very first live frame!
+                                    if rms < 480.0 and peak < 1650:
+                                        noise_floor = max(60.0, min(460.0, rms))
+                                        noise_peak = max(250.0, min(1550.0, float(peak)))
                                     else:
-                                        noise_floor = 350.0
-                                        noise_peak = 1200.0
+                                        noise_floor = 420.0
+                                        noise_peak = 1450.0
 
                                 norm_lvl = min(
                                     1.0,
-                                    max(0.05, (rms - noise_floor * 1.15) / 2200.0),
+                                    max(0.05, (rms - noise_floor * 1.05) / 1350.0),
                                 )
                                 self.current_level = (
-                                    0.45 * self.current_level + 0.55 * norm_lvl
+                                    0.35 * self.current_level + 0.65 * norm_lvl
                                 )
                                 bars = list(self.level_bars[1:]) + [self.current_level]
                                 self.level_bars = bars
 
                                 if self._vad_enabled:
                                     if not speech_started:
-                                        if chunk_count > ignore_chunks:
-                                            onset_thresh = max(
-                                                160.0,
-                                                noise_floor * 2.15,
-                                                noise_floor + 380.0,
+                                        onset_thresh = max(
+                                            160.0,
+                                            noise_floor * 1.65,
+                                            noise_floor + 220.0,
+                                        )
+                                        onset_peak = max(
+                                            600,
+                                            int(noise_peak * 1.45),
+                                            int(noise_peak + 550),
+                                        )
+                                        if rms >= onset_thresh and peak >= onset_peak:
+                                            active_streak += 1
+                                            # Trigger speech_started on the very first voiced chunk (100ms) so there
+                                            # is zero lag when the user starts speaking; brief clicks (<6 chunks)
+                                            # automatically reset back to waiting if silence follows.
+                                            speech_started = True
+                                            self.speech_detected = True
+                                            self.speech_chunks = active_streak
+                                            self._trim_start_idx = max(
+                                                0,
+                                                len(self._frames)
+                                                - active_streak
+                                                - VAD_PRE_ROLL_CHUNKS,
                                             )
-                                            onset_peak = max(
-                                                600,
-                                                int(noise_peak * 1.95),
-                                                int(noise_peak + 1050),
-                                            )
-                                            if rms >= onset_thresh and peak >= onset_peak:
-                                                active_streak += 1
-                                                if active_streak >= 3:
-                                                    speech_started = True
-                                                    self.speech_detected = True
-                                                    self.speech_chunks = active_streak
-                                                    self._trim_start_idx = max(
-                                                        0,
-                                                        len(self._frames)
-                                                        - active_streak
-                                                        - VAD_PRE_ROLL_CHUNKS,
+                                            silence_streak = 0
+                                            resume_streak = 0
+                                        else:
+                                            active_streak = 0
+                                            # Keep a bounded rolling pre-roll window while waiting for the user
+                                            # to start speaking so the mic can stay open indefinitely without RAM growth.
+                                            max_preroll = VAD_PRE_ROLL_CHUNKS + 8
+                                            if len(self._frames) > max_preroll:
+                                                del self._frames[:-max_preroll]
+                                            if rms >= 5.0 and rms < onset_thresh * 0.85:
+                                                noise_floor = (
+                                                    0.85 * noise_floor
+                                                    + 0.15 * max(40.0, min(460.0, rms))
+                                                )
+                                                noise_peak = (
+                                                    0.85 * noise_peak
+                                                    + 0.15
+                                                    * max(
+                                                        200.0,
+                                                        min(1550.0, float(peak)),
                                                     )
-                                                    silence_streak = 0
-                                                    resume_streak = 0
-                                            else:
-                                                active_streak = 0
-                                                # Keep a bounded rolling pre-roll window while waiting for the user
-                                                # to start speaking so the mic can stay open indefinitely without RAM growth.
-                                                max_preroll = VAD_PRE_ROLL_CHUNKS + 8
-                                                if len(self._frames) > max_preroll:
-                                                    del self._frames[:-max_preroll]
-                                                if rms >= 5.0 and rms < onset_thresh * 0.85:
-                                                    noise_floor = (
-                                                        0.82 * noise_floor
-                                                        + 0.18 * max(40.0, min(680.0, rms))
-                                                    )
-                                                    noise_peak = (
-                                                        0.82 * noise_peak
-                                                        + 0.18
-                                                        * max(
-                                                            200.0,
-                                                            min(2500.0, float(peak)),
-                                                        )
-                                                    )
+                                                )
                                     else:
                                         # Continuation threshold sits cleanly above the live ambient room noise floor
                                         # so silence_streak increments immediately when the user stops speaking.
