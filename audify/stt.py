@@ -1733,8 +1733,20 @@ def get_wispr_flow_pids() -> set[int]:
     return pids
 
 
+def _is_wispr_flow_enabled() -> bool:
+    """Return True only when Wispr Flow integration is explicitly enabled in config.json."""
+    try:
+        from audify.config import load_config
+
+        return bool(load_config().get("wispr_flow_enabled", False))
+    except Exception:
+        return False
+
+
 def is_wispr_flow_running() -> bool:
-    """Return True if ``Wispr Flow.exe`` is currently running on Windows."""
+    """Return True if Wispr Flow integration is enabled in config and ``Wispr Flow.exe`` is running."""
+    if not _is_wispr_flow_enabled():
+        return False
     return len(get_wispr_flow_pids()) > 0
 
 
@@ -1746,6 +1758,8 @@ def get_wispr_capture_state_and_peak(
     Returns ``(is_recording_active, mic_peak_0_to_1)`` so we know with 100% accuracy
     when Wispr Flow is actively capturing the microphone and when the user's voice/pitch drops.
     """
+    if not _is_wispr_flow_enabled():
+        return False, 0.0
     pids = wispr_pids if wispr_pids is not None else get_wispr_flow_pids()
     if not pids:
         return False, 0.0
@@ -2043,6 +2057,15 @@ def resolve_groq_api_key(daemon: TTSDaemon | None = None) -> str:
                 return k
         except Exception:
             pass
+    else:
+        try:
+            from audify.config import load_config
+
+            k = str(load_config().get("groq_api_key", "")).strip()
+            if k:
+                return k
+        except Exception:
+            pass
     env_k = os.environ.get("GROQ_API_KEY", "").strip()
     if env_k:
         return env_k
@@ -2083,17 +2106,43 @@ def transcribe_with_groq(
         return False, f"Could not read recorded WAV: {e}"
 
     vocab_terms: list[str] = []
+    seen: set[str] = {
+        "yasir",
+        "yeamin",
+        "yeamin sheikh",
+        "ishan",
+        "shajib",
+        "shoaib",
+        "shib",
+        "sifat",
+        "shifat",
+        "sabrina",
+        "groq",
+        "groq api",
+        "whisper-large-v3",
+        "wispr flow",
+        "antigravity",
+        "helium",
+        "raycast",
+        "adspower",
+        "audify",
+        "agent-s",
+        "ultra studio",
+        "veo 3.1",
+        "nano banana",
+    }
     if vocab:
-        seen: set[str] = set()
         for target in vocab.values():
             t = str(target).strip()
             if t and t.lower() not in seen:
                 seen.add(t.lower())
                 vocab_terms.append(t)
     prompt_str = (
-        "Transcribe English, Bengali (বাংলা), and Hindi (हिन्दी) clearly with accurate punctuation. "
-        "Keep English words in Latin script, Bengali in বাংলা script, and Hindi in हिन्दी script. "
-        + (f"Vocabulary: {', '.join(vocab_terms[:35])}." if vocab_terms else "")
+        "Hello Yasir, Yeamin Sheikh here with Ishan, Shajib, Shoaib, Shib, Sifat, Shifat, and Sabrina. "
+        "Let's use the Groq API key with Whisper Large v3, Wispr Flow, Antigravity, Helium, Chrome, "
+        "Raycast, AdsPower, Audify, Agent-S, Ultra Studio, VEO 3.1, Nano Banana, Gemini, "
+        "Python, PowerShell, GitHub, VS Code, Supabase, Flutter, and Windows 11. বাংলা এবং हिन्दी।"
+        + (f" {', '.join(vocab_terms[:30])}." if vocab_terms else "")
     ).strip()
 
     models_to_try = [model] if model == "whisper-large-v3-turbo" else [model, "whisper-large-v3-turbo"]
@@ -2112,7 +2161,7 @@ def transcribe_with_groq(
 
         _add_field("model", cur_model)
         _add_field("temperature", "0")
-        _add_field("response_format", "json")
+        _add_field("response_format", "verbose_json")
         if prompt_str:
             _add_field("prompt", prompt_str)
 
@@ -2131,14 +2180,33 @@ def transcribe_with_groq(
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "User-Agent": "Audify/2.9.19",
+                "User-Agent": "Audify/2.9.24",
             },
             method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=15.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-            text = str(payload.get("text", "")).strip()
+            segments = payload.get("segments")
+            if isinstance(segments, list) and segments:
+                kept_parts: list[str] = []
+                for seg in segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    seg_txt = str(seg.get("text", "")).strip()
+                    if not seg_txt:
+                        continue
+                    no_speech_prob = float(seg.get("no_speech_prob", 0.0) or 0.0)
+                    avg_logprob = float(seg.get("avg_logprob", 0.0) or 0.0)
+                    comp_ratio = float(seg.get("compression_ratio", 1.0) or 1.0)
+                    if no_speech_prob > 0.80 and avg_logprob < -1.0:
+                        continue
+                    if comp_ratio > 2.6:
+                        continue
+                    kept_parts.append(seg_txt)
+                text = " ".join(kept_parts).strip()
+            else:
+                text = str(payload.get("text", "")).strip()
             low_t = text.lower().strip(" .!,?")
             if low_t in {
                 "subtitles by the amara.org community",
@@ -2197,8 +2265,8 @@ class BarkCleanController:
         self._idle_timer: threading.Timer | None = None
         self._startup_timer: threading.Timer | None = None
 
-        # Watch Wispr Flow (Tier 1) for failures so Audify can automatically take over with Tier 2 (Groq)
-        if self.daemon is not None:
+        # Watch Wispr Flow (Tier 1) for failures only when Wispr Flow integration is enabled
+        if self.daemon is not None and _is_wispr_flow_enabled():
             threading.Thread(
                 target=self._wispr_watchdog_loop,
                 daemon=True,
@@ -2557,7 +2625,7 @@ class BarkCleanController:
                 return False, "Dictation cancelled."
             if ok_groq:
                 raw_text = groq_res.strip()
-                if raw_text and vocab:
+                if raw_text:
                     raw_text = apply_stt_vocabulary(raw_text, vocab)
                 return True, raw_text
             print(
@@ -2615,7 +2683,7 @@ class BarkCleanController:
                 return False, "Dictation cancelled."
             if res.get("ok"):
                 raw_text = str(res.get("text", "")).strip()
-                if raw_text and vocab:
+                if raw_text:
                     raw_text = apply_stt_vocabulary(raw_text, vocab)
                 return True, raw_text
             err_msg = str(res.get("error", "Unknown transcription error"))

@@ -197,16 +197,42 @@ DEFAULT_STT_VOCABULARY: dict[str, str] = {
     "Auditify": "Audify",
     "Autify": "Audify",
     "Odify": "Audify",
+    "rock API": "Groq API",
+    "Rock API": "Groq API",
+    "ROQ": "Groq",
+    "ROC": "Groq",
+    "Grok API": "Groq API",
+    "grok api": "Groq API",
+    "Grok": "Groq",
+    "whisper flow": "Wispr Flow",
+    "Whisper Flow": "Wispr Flow",
+    "WhisperFlow": "Wispr Flow",
+    "wisperflow": "Wispr Flow",
+    "anti gravity": "Antigravity",
+    "anti-gravity": "Antigravity",
+    "Anti-Gravity": "Antigravity",
     "Ultra studio": "Ultra Studio",
+    "nano banana": "Nano Banana",
     "Ads Power": "AdsPower",
     "Adspower": "AdsPower",
     "HLS skill": "Agent-S skill",
     "Agent S": "Agent-S",
+    "agent s": "Agent-S",
     "Cap Cut": "CapCut",
     "ask Maomao": "ask me now",
     "Yamin": "Yeamin",
     "Yemen Sheikh": "Yeamin Sheikh",
-    "Projen Factory": "Pro Gen Factory",
+    "Yasser": "Yasir",
+    "Yasar": "Yasir",
+    "Yaasir": "Yasir",
+    "Eshan": "Ishan",
+    "Ishaan": "Ishan",
+    "Sajib": "Shajib",
+    "Shojib": "Shajib",
+    "Sojib": "Shajib",
+    "Shifath": "Sifat",
+    "Sifath": "Sifat",
+    "Shabrina": "Sabrina",
 }
 
 # Standby Gemini API key saved for optional standalone use outside Antigravity
@@ -214,18 +240,19 @@ DEFAULT_STT_VOCABULARY: dict[str, str] = {
 # STANDBY_GEMINI_API_KEY = "AQ." + "Ab8RN6Km-1gPtRqpzXe4H1R-7yoS6hkV9kc3Zpj2z0cJyHDqGg"
 
 DEFAULT_CONFIG: dict = {
-    "voice": "en-US-AvaMultilingualNeural",
-    "rate": "+55%",
+    "voice": "en-US-JennyNeural",
+    "rate": "+100%",
     "volume": 1.0,
     "read_on_copy": True,
-    "stt_enabled": False,
+    "stt_enabled": True,
+    "wispr_flow_enabled": False,
     "conversation_mode": False,
     "skip_code_blocks": True,
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
     "dictation_hotkey": "double_lctrl",
     "paste_last_hotkey": "ctrl+alt+v",
-    "stt_silence_delay": 1.0,
+    "stt_silence_delay": 1.2,
     "groq_api_key": "",
     "groq_model": "whisper-large-v3",
     "pronunciation_dict": {},
@@ -505,19 +532,48 @@ def remove_stt_vocab_rule(config: dict, heard: str) -> None:
     save_config(config)
 
 
+_STUTTER_WORD_RE = re.compile(
+    r"\b(the|a|an|to|for|in|on|of|and|or|but|is|it|that|this|we|you|i|can|do|will|with|at|from|by|as|be|have|so|like|just|what|how|when|where|why|who)\s+\1\b",
+    re.IGNORECASE,
+)
+_FILLER_RE = re.compile(
+    r"(?:^|(?<=[\s,.!?]))(?:um+|uh+|er+|ah+|hmm+)(?=[,.!?\s]|$)[,\s]*",
+    re.IGNORECASE,
+)
+
+
+def format_spoken_transcript(text: str) -> str:
+    """Clean spoken disfluencies (filler words, accidental word stutters, spacing, capitalization) in <1ms."""
+    if not text:
+        return ""
+    out = _FILLER_RE.sub(" ", text)
+    for _ in range(2):
+        out = _STUTTER_WORD_RE.sub(r"\1", out)
+    out = re.sub(r"\s+([,.;!?])", r"\1", out)
+    out = re.sub(r",\s*,+", ",", out)
+    out = re.sub(r"^[,.\s]+", "", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    if out and out[0].islower():
+        out = out[0].upper() + out[1:]
+    return out
+
+
 def apply_stt_vocabulary(text: str, vocab: dict[str, str] | None) -> str:
-    """Apply user STT vocabulary replacements (case-insensitive word-boundary match)."""
-    if not text or not vocab:
+    """Apply spoken disfluency cleanup and user STT vocabulary replacements."""
+    if not text:
         return text
+    out = format_spoken_transcript(text)
+    merged_vocab: dict[str, str] = dict(DEFAULT_STT_VOCABULARY)
+    if vocab:
+        merged_vocab.update(vocab)
     items = [
         (k.strip(), v.strip())
-        for k, v in vocab.items()
+        for k, v in merged_vocab.items()
         if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
     ]
     if not items:
-        return text
+        return out
     items.sort(key=lambda kv: len(kv[0]), reverse=True)
-    out = text
     for heard, written in items:
         pat = re.compile(rf"(?<!\w){re.escape(heard)}(?!\w)", re.IGNORECASE)
         out = pat.sub(lambda _m, w=written: w, out)
