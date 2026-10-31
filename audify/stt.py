@@ -2193,6 +2193,17 @@ def transcribe_with_groq(
         try:
             with urllib.request.urlopen(req, timeout=15.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            _hallucination_phrases = {
+                "subtitles by the amara.org community",
+                "amara.org",
+                "thanks for watching",
+                "thank you for watching",
+                "thank you",
+                "thanks",
+                "you",
+                "bye",
+                "please subscribe",
+            }
             segments = payload.get("segments")
             if isinstance(segments, list) and segments:
                 kept_parts: list[str] = []
@@ -2202,10 +2213,19 @@ def transcribe_with_groq(
                     seg_txt = str(seg.get("text", "")).strip()
                     if not seg_txt:
                         continue
+                    seg_low = seg_txt.lower().strip(" .!,?♪")
+                    if (
+                        seg_low in _hallucination_phrases
+                        or "amara.org" in seg_low
+                        or "subtitles by" in seg_low
+                        or "thank you for watching" in seg_low
+                        or "thanks for watching" in seg_low
+                    ):
+                        continue
                     no_speech_prob = float(seg.get("no_speech_prob", 0.0) or 0.0)
                     avg_logprob = float(seg.get("avg_logprob", 0.0) or 0.0)
                     comp_ratio = float(seg.get("compression_ratio", 1.0) or 1.0)
-                    if no_speech_prob > 0.80 and avg_logprob < -1.0:
+                    if no_speech_prob > 0.70 and avg_logprob < -0.8:
                         continue
                     if comp_ratio > 2.6:
                         continue
@@ -2213,16 +2233,22 @@ def transcribe_with_groq(
                 text = " ".join(kept_parts).strip()
             else:
                 text = str(payload.get("text", "")).strip()
-            low_t = text.lower().strip(" .!,?")
-            if low_t in {
-                "subtitles by the amara.org community",
-                "amara.org",
-                "thanks for watching",
-                "thank you for watching",
-                "thank you",
-                "you",
-            } or "amara.org" in low_t or "subtitles by" in low_t:
-                return False, "Filtered Whisper silence hallucination."
+            text = re.sub(
+                r"(?:\s*[.!,?]?\s*\b(?:thank you for watching|thanks for watching|subtitles by [^.!?]+)\s*[.!,?]*)+$",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip()
+            low_t = text.lower().strip(" .!,?♪")
+            if (
+                not low_t
+                or low_t in _hallucination_phrases
+                or "amara.org" in low_t
+                or "subtitles by" in low_t
+            ):
+                # Return (True, "") because Groq succeeded and the audio was simply silence!
+                # Returning False here would falsely trigger the Bark 3.0 Clean fallback.
+                return True, ""
             return True, text
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -2550,11 +2576,15 @@ class BarkCleanController:
                     prefix="audify_dictation_", suffix=".wav"
                 )
                 os.close(fd)
+                had_speech = (
+                    self.recorder.speech_detected
+                    and getattr(self.recorder, "speech_chunks", 0) >= 2
+                )
                 duration_s = self.recorder.stop_and_save(wav_path)
                 if self._cancel_seq != my_seq:
                     return
-                if duration_s < 0.25:
-                    out_msg = "Recording too short."
+                if not had_speech or duration_s < 0.25:
+                    out_msg = "No speech detected."
                     return
 
                 ok, out_msg = self.transcribe_file(wav_path, cancel_seq=my_seq)
