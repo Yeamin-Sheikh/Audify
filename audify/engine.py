@@ -343,7 +343,7 @@ class TTSDaemon:
         )
 
         stt_enabled_cfg = bool(self.config.get("stt_enabled", True))
-        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_rctrl"))
+        dictation_hotkey_str = str(self.config.get("dictation_hotkey", "double_lctrl"))
         self._dictation_double_tap = DoubleTapDetector(
             is_double_tap_hotkey(dictation_hotkey_str) if stt_enabled_cfg else None
         )

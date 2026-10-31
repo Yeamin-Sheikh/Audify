@@ -250,7 +250,7 @@ DEFAULT_CONFIG: dict = {
     "skip_code_blocks": True,
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
-    "dictation_hotkey": "double_rctrl",
+    "dictation_hotkey": "double_lctrl",
     "paste_last_hotkey": "ctrl+alt+v",
     "stt_silence_delay": 1.2,
     "groq_api_key": "",

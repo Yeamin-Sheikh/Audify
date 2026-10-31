@@ -2486,11 +2486,11 @@ class BarkCleanController:
         Returns the new state: ``"recording"``, ``"transcribing"``, ``"disabled"``, or ``"busy"``.
         """
         lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
-        hotkey_cfg = "double_rctrl"
+        hotkey_cfg = "double_lctrl"
         if self.daemon is not None:
             with self.daemon._config_lock:
-                hotkey_cfg = str(self.daemon.config.get("dictation_hotkey", "double_rctrl")).strip().lower()
-        if hotkey_cfg == "double_lctrl" and os.path.exists(lock_file):
+                hotkey_cfg = str(self.daemon.config.get("dictation_hotkey", "double_lctrl")).strip().lower()
+        if hotkey_cfg == "double_rctrl" and os.path.exists(lock_file):
             return "agent_handled"
         if not self.is_enabled:
             return "disabled"
