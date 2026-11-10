@@ -265,7 +265,7 @@ def _dictation_hotkey_display_name(daemon: TTSDaemon) -> str:
 
 
 def _paste_last_hotkey_display_name(daemon: TTSDaemon) -> str:
-    hotkey = str(daemon.config.get("paste_last_hotkey", "ctrl+alt+v"))
+    hotkey = str(daemon.config.get("paste_last_hotkey", "alt+shift+z"))
     return format_hotkey_label(hotkey)
 
 
@@ -349,9 +349,13 @@ def setup_tray() -> None:
         """Toggle Underdog Bark 3.0 Clean speech-to-text dictation."""
         daemon.toggle_dictation()
 
+    def on_toggle_handsfree_dictation(icon: pystray.Icon, item_action: item) -> None:
+        """Toggle Hands-Free speech-to-text dictation (manual stop only)."""
+        daemon.toggle_handsfree_dictation()
+
     def on_paste_last_dictation(icon: pystray.Icon, item_action: item) -> None:
-        """Re-paste the most recently dictated speech."""
-        daemon.paste_last_dictation()
+        """Re-paste the most recently dictated speech into the previously focused window."""
+        daemon.paste_last_dictation(from_tray=True)
 
     def on_toggle_skip_code(icon: pystray.Icon, item_action: item) -> None:
         daemon.toggle_skip_code_blocks()
@@ -458,6 +462,29 @@ def setup_tray() -> None:
         for label, d_val in STT_SILENCE_DELAYS.items()
     ]
 
+    def _history_item_label(idx: int) -> str:
+        hist = list(getattr(daemon.stt, "dictation_history", ()))
+        if idx >= len(hist):
+            return f"{idx + 1}."
+        single_line = " ".join(hist[idx].split())
+        preview = single_line if len(single_line) <= 48 else single_line[:45] + "..."
+        return f"{idx + 1}. {preview}"
+
+    def make_history_paster(idx: int) -> Callable[[pystray.Icon, item], None]:
+        def _cb(icon: pystray.Icon, item_action: item) -> None:
+            daemon.paste_history_item(idx)
+
+        return _cb
+
+    history_menu_items = [
+        item(
+            lambda text, i=idx: _history_item_label(i),
+            make_history_paster(idx),
+            visible=lambda item_obj, i=idx: i < len(getattr(daemon.stt, "dictation_history", ())),
+        )
+        for idx in range(20)
+    ]
+
     theme_menu_items = [
         item(
             label,
@@ -501,6 +528,50 @@ def setup_tray() -> None:
             ),
             item("Read Clipboard Now", on_read_clipboard),
             Menu.SEPARATOR,
+            # Speech-to-Text Dictation controls
+            item(
+                lambda text: (
+                    "Dictation Disabled (Light Mode)\tOff"
+                    if not daemon.config.get("stt_enabled", True)
+                    else (
+                        f"{'Stop & Transcribe' if daemon.stt.is_recording else ('Transcribing...' if daemon.stt.is_transcribing else 'Start Dictation')}"
+                        f"\t{_dictation_hotkey_display_name(daemon)}"
+                    )
+                ),
+                on_toggle_dictation,
+                enabled=lambda i: bool(
+                    daemon.config.get("stt_enabled", True)
+                    and not daemon.stt.is_transcribing
+                ),
+            ),
+            item(
+                lambda text: (
+                    f"{'Stop Hands-Free Dictation' if (daemon.stt.is_recording and getattr(daemon.stt, 'dictation_mode', 'auto') == 'handsfree') else 'Hands-Free Dictation'}\tCtrl+Win+Space"
+                ),
+                on_toggle_handsfree_dictation,
+                enabled=lambda i: bool(
+                    daemon.config.get("stt_enabled", True)
+                    and not daemon.stt.is_transcribing
+                ),
+            ),
+            item(
+                lambda text: f"Paste Last Transcript\t{_paste_last_hotkey_display_name(daemon)}",
+                on_paste_last_dictation,
+                enabled=lambda i: bool(
+                    daemon.stt.last_dictated or daemon.stt.has_recoverable_audio
+                ),
+            ),
+            item(
+                lambda text: f"Recent Transcripts\t{len(getattr(daemon.stt, 'dictation_history', ()))}/20",
+                Menu(*history_menu_items),
+                enabled=lambda i: len(getattr(daemon.stt, "dictation_history", ())) > 0,
+            ),
+            item(
+                lambda text: f"Dictation Auto-Stop Delay\t{_silence_delay_display_name(daemon)}",
+                Menu(*silence_delay_menu_items),
+                enabled=lambda i: bool(daemon.config.get("stt_enabled", True)),
+            ),
+            Menu.SEPARATOR,
             # Voice settings with the current value right-aligned
             item(
                 lambda text: f"Voice\t{_voice_display_name(daemon)}",
@@ -520,6 +591,11 @@ def setup_tray() -> None:
                 checked=lambda i: daemon.config.get("read_on_copy", True),
             ),
             item(
+                "Speech-to-Text (Dictation)",
+                on_toggle_stt_enabled,
+                checked=lambda i: daemon.config.get("stt_enabled", True),
+            ),
+            item(
                 "Skip Code Blocks",
                 on_toggle_skip_code,
                 checked=lambda i: daemon.config.get("skip_code_blocks", True),
@@ -529,6 +605,16 @@ def setup_tray() -> None:
                 Menu(*theme_menu_items),
             ),
             Menu.SEPARATOR,
+            item(
+                lambda text: "Restarting Bluetooth..." if is_bluetooth_restarting() else "Restart Bluetooth",
+                on_restart_bluetooth,
+                enabled=lambda i: not is_bluetooth_restarting(),
+            ),
+            item(
+                lambda text: "Resetting Icon Cache..." if is_icon_cache_resetting() else "Reset Icon Cache",
+                on_reset_icon_cache,
+                enabled=lambda i: not is_icon_cache_resetting(),
+            ),
             item("Settings...", on_open_settings),
             item("Quit Audify", on_exit),
         ),

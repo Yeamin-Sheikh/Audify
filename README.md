@@ -115,9 +115,12 @@ Download **`Audify.exe`** and run it from anywhere.
 | Read text aloud | Copy it with `Ctrl+C` or `Ctrl+Shift+C` |
 | Pause / resume | Left-click the tray icon |
 | Stop reading | `Ctrl+Alt+S` from anywhere |
-| Dictate speech to text (Bark 3.0 Clean) | Double-tap `Left Ctrl` and speak; automatically stops, transcribes, and pastes when you pause (or press `Esc` to finish immediately without unfocusing your input field) |
-| Re-paste last dictation | `Ctrl+Alt+V` (or Tray -> **Paste Last Dictation**) if your cursor missed the input box |
-| Change global shortcuts | Open **Control Center...** and click any shortcut badge (`Dictate`, `Paste last dictation`, `Stop playback`) |
+| Dictate speech to text (Auto-Stop) | Double-tap `Left Ctrl` and speak; automatically stops after `1.1s` of silence, transcribes, and pastes (or press `Esc` to cancel immediately) |
+| Auto-press Enter after dictating | Say `"send it"`, `"press enter"`, or `"hit enter"` at the very end of your dictation to automatically press `Enter` after pasting |
+| Quick Push-to-Talk dictation | Hold `Ctrl+Win` while speaking and release `Ctrl+Win` to immediately transcribe and paste |
+| Hands-Free dictation (manual toggle) | Press `Ctrl+Win+Space` (or Tray -> **Hands-Free Dictation**) to start continuous recording with no silence cutoff, and press `Ctrl+Win+Space` again to finish and paste |
+| Re-paste last transcript / dictation | `Alt+Shift+Z` (or Tray -> **Paste Last Transcript** / **Recent Transcripts**) to paste or recover recent transcripts into your active window |
+| Change global shortcuts | Open **Settings...** and click any shortcut badge (`Dictate`, `Paste last transcript`, `Stop playback`) |
 | Teach STT custom names/words | After dictating, double-click any misheard word and type the fix (auto-learns!), or manage in **Control Center -> STT Vocabulary** |
 | Change voice | Tray -> **Voice** |
 | Change speed | Tray -> **Speed** |
@@ -202,6 +205,43 @@ clean_text.py                Markdown to speech text, pronunciation matching
 </details>
 
 ## Changelog
+
+### v2.9.29
+
+- **Zero-Clipboard Direct Unicode Text Injection (`SendInput` `KEYEVENTF_UNICODE`)**:
+  - Added `send_unicode_text` in `audify/stt.py` and updated `_copy_and_paste`, `paste_last_dictation`, and `paste_history_item` to type dictated text directly via Win32 `SendInput` (`KEYEVENTF_UNICODE`) without touching or overwriting the Windows clipboard.
+  - Added automatic clipboard snapshot-and-restore on the UIPI `Ctrl+V` fallback and in `DictationCorrectionLearner._probe_selected_word` so your copied clipboard contents remain completely untouched during and after dictation.
+
+### v2.9.28
+
+- **50% CoreAudio Background Audio Ducking During Dictation**:
+  - Added `duck_background_audio(ratio=0.50)` and `restore_background_audio()` in `audify/engine.py` using Win32 CoreAudio (`ISimpleAudioVolume`) and wired them asynchronously into `start_dictation`, `stop_and_transcribe`, and `cancel_dictation` in `audify/stt.py`.
+  - Lowers active background audio sessions (such as Chrome, Spotify, or VLC) to 50% of their original volume while your microphone is recording and restores their original volume the instant recording stops, adding zero startup delay.
+
+### v2.9.27
+
+- **Spoken Trailing Auto-Enter Command (`"send it"`, `"press enter"`, `"hit enter"`)**:
+  - Added `_extract_trailing_enter_command` and `send_enter_key` (`VK_RETURN`) in `audify/stt.py`. Saying `"send it"`, `"press enter"`, or `"hit enter"` at the very end of a dictation strips the trailing command, pastes your message via `Ctrl+V`, and automatically presses `Enter`.
+  - Ignores `"send it"` when spoken in the middle of a sentence, and keeps `"Send it."` as the message text when `"Send it"` is the only phrase spoken.
+- **Bangladeshi Bengali & Banglish Native Audio Fallback + Auto-Stop VAD Tuning**:
+  - Added Gemini multimodal audio verification (`transcribe_with_gemini_audio` with `gemini-3.1-flash-lite` -> `gemini-2.5-flash` and `thinkingBudget=0`) and NFC/Assamese glyph normalization (`_normalize_bengali_unicode`) in `audify/stt.py` whenever Bengali/Indic script is detected from Whisper.
+  - Lowered the voice-continuation RMS ceiling (`80-145 RMS`) and set default `stt_silence_delay` to `1.1s` (`audify/config.py`) so softer mid-sentence speech never triggers early auto-stop on `Double Left Ctrl`.
+
+### v2.9.26
+
+- **3-Mode Dictation System, Instant Mic Startup, 20-Item Rolling History, & Mode-Aware HUD Pill**:
+  - Added `Double Left Ctrl` (Auto-Stop), `Hold Ctrl+Win` (Push-to-Talk), and `Ctrl+Win+Space` (Hands-Free Toggle) in `audify/clipboard.py`, `audify/engine.py`, and `audify/stt.py`.
+  - Removed legacy Wispr Flow process checks on mic open for instant `<5ms` microphone startup.
+  - Added a 20-item rolling transcript history (`%LOCALAPPDATA%\Audify\dictation_history.json`) and **Recent Transcripts** submenu in `audify/tray.py`.
+  - Updated `DictationVisualizerHUD` (`audify/gui/stt_hud.py`) with monochrome mode labels (`Listening...`, `Hold...`, and `Locked 0:00` timer).
+
+### v2.9.25
+
+- **`Alt+Shift+Z` Paste Last Transcript & Tray Menu Restoration**:
+  - Restored the Speech-to-Text section in the system tray right-click menu (`audify/tray.py`) and Settings UI (`audify/gui/control_center.py`), including **Start Dictation / Stop & Transcribe**, **Paste Last Transcript (`Alt+Shift+Z`)**, **Dictation Auto-Stop Delay**, and **Speech-to-Text (Dictation)**.
+  - Set `Alt+Shift+Z` as the default `paste_last_hotkey` (`audify/config.py`, `audify/clipboard.py`, `audify/engine.py`) with modifier-release guard in `send_ctrl_v()` (`audify/stt.py`) so holding `Alt+Shift+Z` waits for `Alt` and `Shift` to release before sending `Ctrl+V`.
+  - Added foreground window tracking (`_last_user_hwnd` in `audify/engine.py`) and `_restore_foreground_window` (`audify/stt.py`) so clicking **Paste Last Transcript** from the system tray right-click menu restores focus to your previous application window and pastes directly into it.
+  - Added persistent transcript storage (`%LOCALAPPDATA%\Audify\last_dictated.txt`), pre-transcription WAV backup (`%LOCALAPPDATA%\Audify\last_recording.wav`), and clause-aware mid-sentence VAD pause tolerance (`1.4s-2.2s`) so dictation never cuts off or disappears mid-thought.
 
 ### v2.9.22
 

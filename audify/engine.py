@@ -308,6 +308,303 @@ def _verify_and_unmute_process_audio_session() -> bool:
                 pass
 
 
+_duck_lock = threading.Lock()
+_ducked_session_volumes: dict[int, float] = {}
+
+
+def duck_background_audio(ratio: float = 0.50) -> None:
+    """Attenuate active external audio sessions on the default speaker to *ratio* (50%) of their original volume.
+
+    Runs on a background thread when microphone recording starts so it adds zero latency
+    to microphone activation. Preserves each process's pre-ducked volume in
+    ``_ducked_session_volumes`` so ``restore_background_audio`` restores the exact level.
+    """
+    hr_init = _ole32.CoInitializeEx(None, 0)
+    my_pid = os.getpid()
+    enum_ptr = ctypes.c_void_p()
+    dev_ptr = ctypes.c_void_p()
+    mgr_ptr = ctypes.c_void_p()
+    senum_ptr = ctypes.c_void_p()
+    try:
+        hr = _ole32.CoCreateInstance(
+            ctypes.byref(_CLSID_MMDeviceEnumerator),
+            None,
+            7,
+            ctypes.byref(_IID_IMMDeviceEnumerator),
+            ctypes.byref(enum_ptr),
+        )
+        if hr != 0 or not enum_ptr.value:
+            return
+        hr = _com_vcall(
+            enum_ptr,
+            4,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(0, 0, ctypes.byref(dev_ptr))
+        if hr != 0 or not dev_ptr.value:
+            return
+        hr = _com_vcall(
+            dev_ptr,
+            3,
+            ctypes.c_long,
+            ctypes.POINTER(_GUID),
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(ctypes.byref(_IID_IAudioSessionManager2), 7, None, ctypes.byref(mgr_ptr))
+        if hr != 0 or not mgr_ptr.value:
+            return
+        hr = _com_vcall(
+            mgr_ptr, 5, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p)
+        )(ctypes.byref(senum_ptr))
+        if hr != 0 or not senum_ptr.value:
+            return
+
+        scnt = ctypes.c_int()
+        if (
+            _com_vcall(senum_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int))(
+                ctypes.byref(scnt)
+            )
+            != 0
+        ):
+            return
+
+        with _duck_lock:
+            for i in range(scnt.value):
+                s_ptr = ctypes.c_void_p()
+                s2_ptr = ctypes.c_void_p()
+                vol_ptr = ctypes.c_void_p()
+                try:
+                    if (
+                        _com_vcall(
+                            senum_ptr,
+                            4,
+                            ctypes.c_long,
+                            ctypes.c_int,
+                            ctypes.POINTER(ctypes.c_void_p),
+                        )(i, ctypes.byref(s_ptr))
+                        != 0
+                        or not s_ptr.value
+                    ):
+                        continue
+                    if (
+                        _com_vcall(
+                            s_ptr,
+                            0,
+                            ctypes.c_long,
+                            ctypes.POINTER(_GUID),
+                            ctypes.POINTER(ctypes.c_void_p),
+                        )(ctypes.byref(_IID_IAudioSessionControl2), ctypes.byref(s2_ptr))
+                        != 0
+                        or not s2_ptr.value
+                    ):
+                        continue
+                    pid = wintypes.DWORD()
+                    _com_vcall(
+                        s2_ptr, 14, ctypes.c_long, ctypes.POINTER(wintypes.DWORD)
+                    )(ctypes.byref(pid))
+                    if pid.value in (0, my_pid):
+                        continue
+
+                    state = ctypes.c_int()
+                    _com_vcall(
+                        s2_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int)
+                    )(ctypes.byref(state))
+                    if state.value != 1:  # AudioSessionStateActive
+                        continue
+
+                    if (
+                        _com_vcall(
+                            s_ptr,
+                            0,
+                            ctypes.c_long,
+                            ctypes.POINTER(_GUID),
+                            ctypes.POINTER(ctypes.c_void_p),
+                        )(ctypes.byref(_IID_ISimpleAudioVolume), ctypes.byref(vol_ptr))
+                        == 0
+                        and vol_ptr.value
+                    ):
+                        mute = wintypes.BOOL()
+                        _com_vcall(
+                            vol_ptr, 6, ctypes.c_long, ctypes.POINTER(wintypes.BOOL)
+                        )(ctypes.byref(mute))
+                        if mute.value:
+                            continue
+                        cur_vol = ctypes.c_float()
+                        if (
+                            _com_vcall(
+                                vol_ptr,
+                                4,
+                                ctypes.c_long,
+                                ctypes.POINTER(ctypes.c_float),
+                            )(ctypes.byref(cur_vol))
+                            == 0
+                        ):
+                            orig_v = float(cur_vol.value)
+                            if orig_v <= 0.02:
+                                continue
+                            saved_orig = _ducked_session_volumes.setdefault(
+                                int(pid.value), orig_v
+                            )
+                            target_v = max(0.02, min(1.0, saved_orig * float(ratio)))
+                            _com_vcall(
+                                vol_ptr,
+                                3,
+                                ctypes.c_long,
+                                ctypes.c_float,
+                                ctypes.c_void_p,
+                            )(target_v, None)
+                finally:
+                    _com_release(vol_ptr)
+                    _com_release(s2_ptr)
+                    _com_release(s_ptr)
+    except Exception:
+        pass
+    finally:
+        _com_release(senum_ptr)
+        _com_release(mgr_ptr)
+        _com_release(dev_ptr)
+        _com_release(enum_ptr)
+        if hr_init in (0, 1):
+            try:
+                _ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
+def restore_background_audio() -> None:
+    """Restore any background audio sessions that were ducked during dictation to their original volume."""
+    with _duck_lock:
+        if not _ducked_session_volumes:
+            return
+        to_restore = dict(_ducked_session_volumes)
+        _ducked_session_volumes.clear()
+
+    hr_init = _ole32.CoInitializeEx(None, 0)
+    enum_ptr = ctypes.c_void_p()
+    dev_ptr = ctypes.c_void_p()
+    mgr_ptr = ctypes.c_void_p()
+    senum_ptr = ctypes.c_void_p()
+    try:
+        hr = _ole32.CoCreateInstance(
+            ctypes.byref(_CLSID_MMDeviceEnumerator),
+            None,
+            7,
+            ctypes.byref(_IID_IMMDeviceEnumerator),
+            ctypes.byref(enum_ptr),
+        )
+        if hr != 0 or not enum_ptr.value:
+            return
+        hr = _com_vcall(
+            enum_ptr,
+            4,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(0, 0, ctypes.byref(dev_ptr))
+        if hr != 0 or not dev_ptr.value:
+            return
+        hr = _com_vcall(
+            dev_ptr,
+            3,
+            ctypes.c_long,
+            ctypes.POINTER(_GUID),
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(ctypes.byref(_IID_IAudioSessionManager2), 7, None, ctypes.byref(mgr_ptr))
+        if hr != 0 or not mgr_ptr.value:
+            return
+        hr = _com_vcall(
+            mgr_ptr, 5, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p)
+        )(ctypes.byref(senum_ptr))
+        if hr != 0 or not senum_ptr.value:
+            return
+
+        scnt = ctypes.c_int()
+        if (
+            _com_vcall(senum_ptr, 3, ctypes.c_long, ctypes.POINTER(ctypes.c_int))(
+                ctypes.byref(scnt)
+            )
+            != 0
+        ):
+            return
+
+        for i in range(scnt.value):
+            s_ptr = ctypes.c_void_p()
+            s2_ptr = ctypes.c_void_p()
+            vol_ptr = ctypes.c_void_p()
+            try:
+                if (
+                    _com_vcall(
+                        senum_ptr,
+                        4,
+                        ctypes.c_long,
+                        ctypes.c_int,
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(i, ctypes.byref(s_ptr))
+                    != 0
+                    or not s_ptr.value
+                ):
+                    continue
+                if (
+                    _com_vcall(
+                        s_ptr,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(_GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(ctypes.byref(_IID_IAudioSessionControl2), ctypes.byref(s2_ptr))
+                    != 0
+                    or not s2_ptr.value
+                ):
+                    continue
+                pid = wintypes.DWORD()
+                _com_vcall(
+                    s2_ptr, 14, ctypes.c_long, ctypes.POINTER(wintypes.DWORD)
+                )(ctypes.byref(pid))
+                orig_v = to_restore.get(int(pid.value))
+                if orig_v is None:
+                    continue
+                if (
+                    _com_vcall(
+                        s_ptr,
+                        0,
+                        ctypes.c_long,
+                        ctypes.POINTER(_GUID),
+                        ctypes.POINTER(ctypes.c_void_p),
+                    )(ctypes.byref(_IID_ISimpleAudioVolume), ctypes.byref(vol_ptr))
+                    == 0
+                    and vol_ptr.value
+                ):
+                    _com_vcall(
+                        vol_ptr,
+                        3,
+                        ctypes.c_long,
+                        ctypes.c_float,
+                        ctypes.c_void_p,
+                    )(max(0.0, min(1.0, float(orig_v))), None)
+            finally:
+                _com_release(vol_ptr)
+                _com_release(s2_ptr)
+                _com_release(s_ptr)
+    except Exception:
+        pass
+    finally:
+        _com_release(senum_ptr)
+        _com_release(mgr_ptr)
+        _com_release(dev_ptr)
+        _com_release(enum_ptr)
+        if hr_init in (0, 1):
+            try:
+                _ole32.CoUninitialize()
+            except Exception:
+                pass
+
+
 class TTSDaemon:
     """Background daemon that converts queued text to speech via Edge TTS."""
 
@@ -354,16 +651,23 @@ class TTSDaemon:
         )
         self._dictation_combo_was_down: bool = False
 
-        paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "ctrl+alt+v"))
+        paste_last_hotkey_str = str(self.config.get("paste_last_hotkey", "alt+shift+z"))
         self._paste_last_double_tap = DoubleTapDetector(
-            is_double_tap_hotkey(paste_last_hotkey_str) if stt_enabled_cfg else None
+            is_double_tap_hotkey(paste_last_hotkey_str)
         )
         self._paste_last_hotkey_parsed = (
             None
-            if (not stt_enabled_cfg or self._paste_last_double_tap.target_vk is not None)
+            if self._paste_last_double_tap.target_vk is not None
             else parse_win32_hotkey(paste_last_hotkey_str)
         )
         self._paste_last_combo_was_down: bool = False
+        self._last_user_hwnd: int = 0
+        self._ctrl_win_down_since: float = 0.0
+        self._ptt_start_time: float = 0.0
+        self._ctrl_win_ignore_until_release: bool = False
+        self._handsfree_wait_release: bool = False
+        self._handsfree_combo_was_down: bool = False
+        self._last_handsfree_trigger: float = 0.0
 
         # Speech-to-Text controller
         self.stt = BarkCleanController(daemon=self)
@@ -384,6 +688,7 @@ class TTSDaemon:
             on_dictation_hotkey=self.toggle_dictation,
             paste_last_hotkey=paste_last_hotkey_str,
             on_paste_last_hotkey=self.paste_last_dictation,
+            on_handsfree_hotkey=self.toggle_handsfree_dictation,
             on_escape_hotkey=self.stt.on_escape_pressed,
             stt_enabled=stt_enabled_cfg,
         )
@@ -551,7 +856,15 @@ class TTSDaemon:
         return True
 
     def _is_paste_last_combo_down(self) -> bool:
-        """Return True if the configured paste-last hotkey (e.g. Ctrl+Alt+V) is physically held down."""
+        """Return True if the configured paste-last hotkey (e.g. Alt+Shift+Z or Ctrl+Alt+V) is physically held down."""
+        # Always accept Alt+Shift+Z directly
+        if (
+            is_vk_down(ord("Z"))
+            and is_vk_down(VK_MENU)
+            and is_vk_down(VK_SHIFT)
+            and not is_vk_down(VK_CONTROL)
+        ):
+            return True
         if self._paste_last_hotkey_parsed is None:
             return False
         mods, vk = self._paste_last_hotkey_parsed
@@ -566,16 +879,57 @@ class TTSDaemon:
         return True
 
     def toggle_dictation(self) -> None:
-        """Toggle Bark 3.0 Clean microphone dictation on/off."""
+        """Toggle microphone dictation on/off (Auto-Stop mode via Double Left Ctrl)."""
         if not self.config.get("stt_enabled", True):
             return
         self.stt.toggle_dictation()
 
-    def paste_last_dictation(self) -> None:
-        """Re-paste the most recently dictated speech into the active input field."""
+    def toggle_handsfree_dictation(self) -> None:
+        """Toggle Hands-Free dictation (Ctrl+Win+Space), or promote an active Push-to-Talk session."""
         if not self.config.get("stt_enabled", True):
             return
-        self.stt.paste_last_dictation()
+        if self._ctrl_win_ignore_until_release and not self.stt.is_recording:
+            return
+        now = time.monotonic()
+        if (now - self._last_handsfree_trigger) < 0.22:
+            return
+        self._last_handsfree_trigger = now
+
+        # If the user started holding Ctrl+Win (PTT) and pressed Space within 1.5s,
+        # promote the active PTT session into Hands-Free mode so releasing keys keeps recording
+        if (
+            self.stt.is_recording
+            and self.stt.dictation_mode == "ptt"
+            and (now - self._ptt_start_time) < 1.5
+        ):
+            self._handsfree_wait_release = True
+            self.stt.promote_to_handsfree()
+            return
+
+        if self.stt.is_recording:
+            self._ctrl_win_ignore_until_release = True
+            self.stt.stop_and_transcribe()
+            return
+
+        self._handsfree_wait_release = True
+        self.stt.toggle_handsfree_dictation()
+
+    def paste_last_dictation(self, from_tray: bool = False) -> None:
+        """Re-paste the most recently dictated speech into the active input field."""
+        self.stt.paste_last_dictation(
+            from_tray=from_tray,
+            target_hwnd=self._last_user_hwnd if from_tray else None,
+        )
+
+    def paste_history_item(self, index: int) -> None:
+        """Paste the transcript at *index* in the rolling 20-item history into the active window."""
+        hist = list(getattr(self.stt, "dictation_history", ()))
+        if 0 <= index < len(hist):
+            self.stt.paste_history_item(
+                hist[index],
+                from_tray=True,
+                target_hwnd=self._last_user_hwnd,
+            )
 
     def set_stt_silence_delay(self, delay_s: float) -> None:
         """Update the auto-stop silence delay (in seconds) for Bark 3.0 Clean dictation."""
@@ -634,13 +988,48 @@ class TTSDaemon:
 
     def _poll_input_state_loop(self) -> None:
         """Poll Win32 GetAsyncKeyState every 15ms so copy/stop/dictation keys work even in Admin windows."""
+        from audify.clipboard import attach_input_desktop
+        attach_input_desktop()
         # Flush any pre-startup 0x0001 bits from key/mouse presses before Audify launched
         try:
             check_copy_keys()
         except Exception:
             pass
+        u32 = ctypes.windll.user32
+        my_pid = os.getpid()
+        cls_buf = ctypes.create_unicode_buffer(128)
+        title_buf = ctypes.create_unicode_buffer(256)
+        fg_pid = wintypes.DWORD(0)
+        tray_classes = {
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "NotifyIconOverflowWindow",
+            "TopLevelWindowForOverflowXamlIsland",
+            "Windows.UI.Input.InputSite.WindowClass",
+            "XamlExplorerHostIslandWindow",
+            "#32768",
+            "Progman",
+            "WorkerW",
+            "pystray",
+        }
+        poll_tick = 0
         while True:
             try:
+                poll_tick += 1
+                if poll_tick % 4 == 0:
+                    fg = u32.GetForegroundWindow()
+                    if fg and fg != self._last_user_hwnd and u32.IsWindowVisible(fg):
+                        u32.GetClassNameW(fg, cls_buf, 128)
+                        if cls_buf.value not in tray_classes:
+                            u32.GetWindowThreadProcessId(fg, ctypes.byref(fg_pid))
+                            if fg_pid.value != my_pid:
+                                self._last_user_hwnd = fg
+                            else:
+                                u32.GetWindowTextW(fg, title_buf, 256)
+                                t_val = title_buf.value.strip()
+                                if t_val and not t_val.startswith("Audify"):
+                                    self._last_user_hwnd = fg
+
                 if check_copy_keys() and not self.stt.learner.is_probing_clipboard and (time.monotonic() - self.stt.learner.last_probe_time) >= 0.25:
                     self.last_ctrl_c_time = time.time()
                     self._dictation_double_tap.taint()
@@ -654,25 +1043,88 @@ class TTSDaemon:
                     self.stop_audio()
 
                 if self.config.get("stt_enabled", True):
-                    if self._dictation_double_tap.poll():
-                        self.toggle_dictation()
-                    else:
-                        dict_down = self._is_dictation_combo_down()
-                        if dict_down and not self._dictation_combo_was_down:
-                            self._dictation_combo_was_down = True
-                            self.toggle_dictation()
-                        elif not dict_down:
-                            self._dictation_combo_was_down = False
+                    ctrl_down = is_vk_down(VK_CONTROL) or is_vk_down(0xA2) or is_vk_down(0xA3)
+                    win_down = is_vk_down(0x5B) or is_vk_down(0x5C)
+                    alt_down = is_vk_down(VK_MENU)
+                    shift_down = is_vk_down(VK_SHIFT)
+                    space_down = is_vk_down(0x20)
 
-                    if self._paste_last_double_tap.poll():
-                        self.paste_last_dictation()
+                    if ctrl_down and win_down:
+                        self._dictation_double_tap.taint()
+
+                    if not (ctrl_down and win_down):
+                        self._ctrl_win_down_since = 0.0
+                        self._ctrl_win_ignore_until_release = False
+                        self._handsfree_wait_release = False
+                        self._handsfree_combo_was_down = False
+                        if self.stt.is_recording and self.stt.dictation_mode == "ptt":
+                            if (
+                                (time.monotonic() - self._ptt_start_time) >= 0.18
+                                or self.stt.recorder.speech_detected
+                            ):
+                                self.stt.stop_and_transcribe()
+                            else:
+                                self.stt.cancel_dictation()
                     else:
-                        paste_down = self._is_paste_last_combo_down()
-                        if paste_down and not self._paste_last_combo_was_down:
-                            self._paste_last_combo_was_down = True
-                            self.paste_last_dictation()
-                        elif not paste_down:
-                            self._paste_last_combo_was_down = False
+                        if alt_down or shift_down:
+                            self._ctrl_win_ignore_until_release = True
+                            if (
+                                self.stt.is_recording
+                                and self.stt.dictation_mode == "ptt"
+                                and (time.monotonic() - self._ptt_start_time) < 0.6
+                            ):
+                                self.stt.cancel_dictation()
+                        elif space_down:
+                            if not self._handsfree_combo_was_down:
+                                self._handsfree_combo_was_down = True
+                                u32.keybd_event(0xFF, 0, 2, 0)
+                                self.toggle_handsfree_dictation()
+                        else:
+                            self._handsfree_combo_was_down = False
+                            if (
+                                not self._ctrl_win_ignore_until_release
+                                and not self._handsfree_wait_release
+                            ):
+                                if self._ctrl_win_down_since == 0.0:
+                                    self._ctrl_win_down_since = time.monotonic()
+                                    # Mask Win key chord with unassigned 0xFF keyup so releasing Win never opens Start Menu
+                                    u32.keybd_event(0xFF, 0, 2, 0)
+                                    if (
+                                        self.stt.is_recording
+                                        and self.stt.dictation_mode in ("handsfree", "auto")
+                                    ):
+                                        self._ctrl_win_ignore_until_release = True
+                                        self.stt.stop_and_transcribe()
+                                elif (
+                                    not self.stt.is_recording
+                                    and not self.stt.is_transcribing
+                                    and (time.monotonic() - self._ctrl_win_down_since) >= 0.08
+                                ):
+                                    self._ptt_start_time = time.monotonic()
+                                    self.stt.start_dictation(
+                                        auto_stop_on_silence=False, mode="ptt"
+                                    )
+
+                    if not (ctrl_down and win_down):
+                        if self._dictation_double_tap.poll():
+                            self.toggle_dictation()
+                        else:
+                            dict_down = self._is_dictation_combo_down()
+                            if dict_down and not self._dictation_combo_was_down:
+                                self._dictation_combo_was_down = True
+                                self.toggle_dictation()
+                            elif not dict_down:
+                                self._dictation_combo_was_down = False
+
+                if self._paste_last_double_tap.poll():
+                    self.paste_last_dictation()
+                else:
+                    paste_down = self._is_paste_last_combo_down()
+                    if paste_down and not self._paste_last_combo_was_down:
+                        self._paste_last_combo_was_down = True
+                        self.paste_last_dictation()
+                    elif not paste_down:
+                        self._paste_last_combo_was_down = False
             except Exception:
                 pass
             time.sleep(0.015)
@@ -694,6 +1146,26 @@ class TTSDaemon:
         if name in ("esc", "escape") and self.stt.is_busy:
             self.stt.cancel_dictation()
             return
+        if self._ctrl_win_down_since > 0.0 and name not in (
+            "ctrl",
+            "left ctrl",
+            "right ctrl",
+            "control_l",
+            "control_r",
+            "left windows",
+            "right windows",
+            "win",
+            "windows",
+            "space",
+            "",
+        ):
+            self._ctrl_win_ignore_until_release = True
+            if (
+                self.stt.is_recording
+                and self.stt.dictation_mode == "ptt"
+                and (time.monotonic() - self._ptt_start_time) < 0.6
+            ):
+                self.stt.cancel_dictation()
         self._dictation_double_tap.taint_if_other_key(name)
         self._stop_double_tap.taint_if_other_key(name)
         self._paste_last_double_tap.taint_if_other_key(name)
@@ -704,7 +1176,7 @@ class TTSDaemon:
         elif stt_on and self._is_dictation_combo_down() and not self._dictation_combo_was_down:
             self._dictation_combo_was_down = True
             self.toggle_dictation()
-        elif stt_on and self._is_paste_last_combo_down() and not self._paste_last_combo_was_down:
+        elif self._is_paste_last_combo_down() and not self._paste_last_combo_was_down:
             self._paste_last_combo_was_down = True
             self.paste_last_dictation()
 
@@ -1275,7 +1747,12 @@ class TTSDaemon:
             or not text.strip()
         ):
             return
-        if self.stt.learner.is_probing_clipboard or (time.monotonic() - self.stt.learner.last_probe_time) < 0.35:
+        if (
+            self.stt.is_busy
+            or self.stt.learner.is_probing_clipboard
+            or (time.monotonic() - self.stt.learner.last_probe_time) < 0.35
+            or (time.monotonic() - getattr(self.stt, "last_clipboard_write_time", 0.0)) < 0.85
+        ):
             return
         if is_just_url(text):
             return

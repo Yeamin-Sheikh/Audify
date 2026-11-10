@@ -6,12 +6,51 @@
 
 - **Project:** Audify
 - **Started:** 2026-10-16
-- **Last updated:** 2026-10-29
+- **Last updated:** 2026-11-06
 - **Status:** Active
 
 ---
 
 ## Progress log
+
+### 2026-11-06, v2.9.26 3-Mode Dictation System (Auto-Stop, Hold Ctrl+Win Push-to-Talk, Ctrl+Win+Space Hands-Free) & Fast 0.8s Listener Auto-Stop
+
+**Duration:** ~15m
+**Status:** Done
+
+#### What changed
+- Added 3-mode dictation versatility across `audify/clipboard.py`, `audify/stt.py`, `audify/engine.py`, `audify/tray.py`, and `audify/gui/control_center.py`:
+  1. **Auto-Stop Dictation (`Double Left Ctrl`)**: Starts recording with `auto_stop_on_silence=True` (`0.8s` silence threshold) and automatically stops, transcribes, and pastes when you finish speaking.
+  2. **Push-to-Talk Quick Dictation (Hold `Ctrl+Win`)**: Holding `Ctrl+Win` for 80ms starts `mode="ptt"` with `auto_stop_on_silence=False` (suppressing the Windows Start Menu popup via a `0xFF` mask keyup), and releasing `Ctrl` or `Win` immediately stops recording, transcribes, and pastes.
+  3. **Hands-Free Toggle Dictation (`Ctrl+Win+Space`)**: Intercepted via `WH_KEYBOARD_LL` and `RegisterHotKey` (`HOTKEY_ID_HANDSFREE`), toggles `mode="handsfree"` with `auto_stop_on_silence=False` (or promotes an active `Ctrl+Win` push-to-talk session into hands-free lock) and stops & transcribes when pressed again.
+- Eliminated the 3.8s post-speech delay by removing the hardcoded 22-chunk (`2.2s`) silence floor in `Win32MicRecorder._record_loop`, setting `stt_silence_delay` to `0.8s`, ignoring single-chunk transient clicks during trailing silence, pre-warming a persistent TLS connection to `api.groq.com` during recording (`prewarm_groq_connection`), and hiding the HUD pill immediately when transcription completes.
+- Uninstalled Wispr Flow completely from the system.
+- Bumped version to `2.9.26`.
+
+#### Files touched
+- `audify/config.py`, `audify/clipboard.py`, `audify/stt.py`, `audify/engine.py`, `audify/tray.py`, `audify/gui/control_center.py`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, `PROGRESS.md`.
+
+---
+
+### 2026-11-06, v2.9.25 Fix mid-dictation cutoff, bind Alt+Shift+Z Paste Last Transcript, and restore Tray Menu & Settings STT controls
+
+**Duration:** ~15m
+**Status:** Done
+
+#### What changed
+- Restored Speech-to-Text items in `audify/tray.py` (`Start Dictation`, `Paste Last Transcript\tAlt+Shift+Z`, `Dictation Auto-Stop Delay`, `Speech-to-Text (Dictation)`) and `audify/gui/control_center.py`.
+- Updated default `paste_last_hotkey` to `alt+shift+z` (`audify/config.py`, `audify/clipboard.py`, `audify/engine.py`) while keeping `ctrl+alt+v` bound as a secondary alias (`HOTKEY_ID_PASTE_LAST_ALT`).
+- Updated `send_ctrl_v()` (`audify/stt.py`) to wait up to 600ms for `Alt` (`VK_MENU`) and `Shift` (`VK_SHIFT`) release and emit explicit `KEYEVENTF_KEYUP` events before synthesizing `Ctrl+V`.
+- Added `_last_user_hwnd` tracking (`audify/engine.py`) and `_restore_foreground_window` (`audify/stt.py`) so clicking `Paste Last Transcript` from the system tray right-click menu restores focus to the active user window and pastes cleanly.
+- Persisted `last_dictated` to `%LOCALAPPDATA%\Audify\last_dictated.txt` and backed up `last_recording.wav` before transcription (`audify/stt.py`), plus increased mid-sentence VAD pause tolerance (`1.4s-2.2s`) so dictation never disappears mid-sentence.
+- Rebuilt `Audify.exe` and `App\Audify\` and deployed to `C:\Users\Yeamin-Sheikh\AppData\Local\Programs\Audify\`.
+
+#### Files touched
+- `audify/config.py`, `audify/clipboard.py`, `audify/stt.py`, `audify/engine.py`, `audify/tray.py`, `audify/gui/control_center.py`, `audify/gui/stt_hud.py`.
+- `audify/__init__.py`, `version_info.txt`, `build_exe.bat`, `installer.iss`, `README.md`, `PROGRESS.md`, bumped version to `2.9.25`.
+
+---
 
 ### 2026-10-29, v2.9.22 Voice Agent capability upgrade: WMI out-of-job app launcher, barge-in, focus-safe paste shield, and rich telemetry
 

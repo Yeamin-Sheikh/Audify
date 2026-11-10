@@ -163,6 +163,18 @@ class DictationVisualizerHUD:
             self._toast_until = time.monotonic() + float(duration_s)
         self._ensure_thread_started()
 
+    def show_toast(self, message: str, duration_s: float = 1.8) -> None:
+        """Show a brief non-obstructive confirmation banner in the pill."""
+        clean = (message or "").strip()
+        if not clean:
+            return
+        if len(clean) > 54:
+            clean = clean[:52] + "…"
+        with self._lock:
+            self._toast_text = clean
+            self._toast_until = time.monotonic() + float(duration_s)
+        self._ensure_thread_started()
+
     def _current_palette(self) -> dict[str, str]:
         """Resolve the active WinUI 3 palette from daemon config ('system', 'light', or 'dark')."""
         daemon = getattr(self.stt, "daemon", None)
@@ -193,6 +205,17 @@ class DictationVisualizerHUD:
         return hwnd
 
     def _run_loop(self) -> None:
+        try:
+            u32_desk = ctypes.windll.user32
+            k32_desk = ctypes.windll.kernel32
+            h_desk = u32_desk.OpenInputDesktop(0, False, 0x01FF)
+            if h_desk:
+                ok_desk = bool(u32_desk.SetThreadDesktop(h_desk))
+                k32_desk.SetLastError(0)
+                if not ok_desk:
+                    u32_desk.CloseDesktop(h_desk)
+        except Exception:
+            pass
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
@@ -228,18 +251,19 @@ class DictationVisualizerHUD:
         bar_w = S(3.5)
         bar_gap = S(3.0)
         bars_total_w = num_bars * bar_w + (num_bars - 1) * bar_gap
-        dot_r = S(4.0)
-        pad_x = S(13)
-        dot_bar_gap = S(8)
+        dot_r = S(4.5)
+        pad_x = S(15)
+        dot_bar_gap = S(9)
+        label_w = S(68)
 
-        pill_w = pad_x + (2 * dot_r) + dot_bar_gap + bars_total_w + pad_x
+        pill_w = pad_x + (2 * dot_r) + dot_bar_gap + label_w + dot_bar_gap + bars_total_w + pad_x
         viz_w = int(round(pill_w + S(4)))
         cur_w = [viz_w]
-        h = S(36)
+        h = S(40)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         x = (sw - viz_w) // 2
-        y = sh - h - S(64)
+        y = sh - h - S(68)
         root.geometry(f"{viz_w}x{h}+{x}+{y}")
         root.update_idletasks()
         hwnd = self._apply_noactivate_clickthrough(root)
@@ -276,11 +300,21 @@ class DictationVisualizerHUD:
             dot_cy - dot_r,
             dcx + dot_r,
             dot_cy + dot_r,
-            fill=pal["pill_bar_idle"],
+            fill="#FF3B30",
             outline="",
         )
 
-        bars_start_x = int(round(dcx + dot_r + dot_bar_gap))
+        label_x = int(round(dcx + dot_r + dot_bar_gap))
+        mode_label_id = canvas.create_text(
+            label_x,
+            dot_cy,
+            text="Listening...",
+            fill=pal["pill_bar_active"],
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+        )
+
+        bars_start_x = int(round(label_x + label_w + dot_bar_gap))
         bar_ids: list[int] = []
         for i in range(num_bars):
             bx = bars_start_x + i * (bar_w + bar_gap)
@@ -370,6 +404,7 @@ class DictationVisualizerHUD:
                 if not in_toast_layout[0]:
                     in_toast_layout[0] = True
                     canvas.itemconfig(dot_id, state="hidden")
+                    canvas.itemconfig(mode_label_id, state="hidden")
                     for bid in bar_ids:
                         canvas.itemconfig(bid, state="hidden")
                     canvas.itemconfig(toast_text_id, state="normal")
@@ -387,6 +422,7 @@ class DictationVisualizerHUD:
                     in_toast_layout[0] = False
                     canvas.itemconfig(toast_text_id, state="hidden")
                     canvas.itemconfig(dot_id, state="normal")
+                    canvas.itemconfig(mode_label_id, state="normal")
                     for bid in bar_ids:
                         canvas.itemconfig(bid, state="normal")
                 _set_pill_width(viz_w)
@@ -412,11 +448,16 @@ class DictationVisualizerHUD:
                 return
 
             t = time.perf_counter()
-            max_half_h = S(10.5)
+            max_half_h = S(11.5)
             min_half_h = S(2.5)
 
             if trans:
-                canvas.itemconfig(dot_id, fill=pal_now["pill_bar_transcribe"])
+                canvas.itemconfig(dot_id, fill="#0A84FF")
+                canvas.itemconfig(
+                    mode_label_id,
+                    text="Thinking...",
+                    fill=pal_now["pill_bar_transcribe"],
+                )
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)
                     wave_v = 0.5 + 0.5 * math.sin(t * 7.5 - i * 0.55)
@@ -425,27 +466,37 @@ class DictationVisualizerHUD:
                     canvas.itemconfig(bid, fill=pal_now["pill_bar_transcribe"])
             else:
                 levels = list(getattr(self.stt.recorder, "level_bars", ()))
-                pulse = 0.5 + 0.5 * math.sin(t * 5.0)
-                dot_col = (
-                    pal_now["pill_dot_hi"]
-                    if pulse > 0.45
-                    else pal_now["pill_dot_lo"]
-                )
+                pulse = 0.5 + 0.5 * math.sin(t * 5.5)
+                dot_col = "#FF3B30" if pulse > 0.35 else "#B3261E"
                 canvas.itemconfig(dot_id, fill=dot_col)
+                d_mode = str(getattr(self.stt, "dictation_mode", "auto"))
+                if d_mode == "ptt":
+                    rec_label = "Hold..."
+                elif d_mode == "handsfree":
+                    started_at = float(getattr(self.stt.recorder, "_started_at", 0.0) or 0.0)
+                    elapsed_s = max(0, int(time.monotonic() - started_at)) if started_at else 0
+                    rec_label = f"Locked {elapsed_s // 60}:{elapsed_s % 60:02d}"
+                else:
+                    rec_label = "Listening..."
+                canvas.itemconfig(
+                    mode_label_id,
+                    text=rec_label,
+                    fill=pal_now["pill_bar_active"],
+                )
 
                 for i, bid in enumerate(bar_ids):
                     bx = bars_start_x + i * (bar_w + bar_gap)
                     lvl = levels[i] if i < len(levels) else 0.0
                     center_weight = 1.0 - 0.12 * abs(i - (num_bars // 2))
-                    idle_wave = 0.14 + 0.08 * math.sin(t * 4.2 + i * 0.65)
-                    eff = max(idle_wave, min(1.0, lvl * center_weight * 1.25))
+                    idle_wave = 0.18 + 0.10 * math.sin(t * 4.5 + i * 0.65)
+                    eff = max(idle_wave, min(1.0, lvl * center_weight * 1.45))
                     hh = min_half_h + eff * (max_half_h - min_half_h)
                     canvas.coords(bid, bx, dot_cy - hh, bx + bar_w, dot_cy + hh)
                     canvas.itemconfig(
                         bid,
                         fill=(
                             pal_now["pill_bar_active"]
-                            if eff > 0.28
+                            if eff > 0.22
                             else pal_now["pill_bar_idle"]
                         ),
                     )

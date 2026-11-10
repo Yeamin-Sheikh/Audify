@@ -139,7 +139,7 @@ def resolve_voice_for_text(text: str, default_voice: str) -> str:
     is_male = any(m.lower() in default_voice.lower() for m in _MALE_VOICE_MARKERS)
     if bn_count >= hi_count:
         return default_voice if default_voice.lower().startswith("bn-") else ("bn-BD-PradeepNeural" if is_male else "bn-BD-NabanitaNeural")
-    return default_voice if default_voice.lower().startswith("hi-") else ("hi-IN-MadhurNeural" if is_male else "hi-IN-SwaraNeural")
+    return default_voice if default_voice.lower().startswith("hi-") else ("en-US-JennyNeural" if is_male else "en-US-JennyNeural")
 
 
 def resolve_rate_for_voice(voice: str, configured_rate: str) -> str:

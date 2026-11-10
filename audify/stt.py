@@ -26,6 +26,7 @@ import gc
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -404,8 +405,8 @@ class Win32MicRecorder:
                         resume_streak = 0
                         chunk_count = 10
                         ignore_chunks = 0
-                        noise_floor = 420.0
-                        noise_peak = 1450.0
+                        noise_floor = min(noise_floor, 180.0) if noise_seeded else 140.0
+                        noise_peak = min(noise_peak, 650.0) if noise_seeded else 520.0
                         noise_seeded = True
 
                 any_done = False
@@ -427,14 +428,14 @@ class Win32MicRecorder:
                             else:
                                 if not noise_seeded:
                                     noise_seeded = True
-                                    # Never seed noise_floor above ambient room level (~445 RMS / ~1500 peak),
-                                    # even if the user is already speaking on the very first live frame!
-                                    if rms < 480.0 and peak < 1650:
-                                        noise_floor = max(60.0, min(460.0, rms))
-                                        noise_peak = max(250.0, min(1550.0, float(peak)))
+                                    # Seed noise_floor conservatively (<=85 RMS / <=280 peak) so if the user
+                                    # starts speaking on the very first frame, we never mistake their voice for room noise.
+                                    if rms < 85.0 and peak < 280:
+                                        noise_floor = max(35.0, min(85.0, rms))
+                                        noise_peak = max(120.0, min(280.0, float(peak)))
                                     else:
-                                        noise_floor = 420.0
-                                        noise_peak = 1450.0
+                                        noise_floor = 50.0
+                                        noise_peak = 175.0
 
                                 norm_lvl = min(
                                     1.0,
@@ -446,17 +447,17 @@ class Win32MicRecorder:
                                 bars = list(self.level_bars[1:]) + [self.current_level]
                                 self.level_bars = bars
 
-                                if self._vad_enabled:
+                                if True:
                                     if not speech_started:
                                         onset_thresh = max(
                                             160.0,
                                             noise_floor * 1.65,
-                                            noise_floor + 220.0,
+                                            noise_floor + 200.0,
                                         )
                                         onset_peak = max(
                                             600,
                                             int(noise_peak * 1.45),
-                                            int(noise_peak + 550),
+                                            int(noise_peak + 500),
                                         )
                                         if rms >= onset_thresh and peak >= onset_peak:
                                             active_streak += 1
@@ -477,87 +478,75 @@ class Win32MicRecorder:
                                         else:
                                             active_streak = 0
                                             # Keep a bounded rolling pre-roll window while waiting for the user
-                                            # to start speaking so the mic can stay open indefinitely without RAM growth.
-                                            max_preroll = VAD_PRE_ROLL_CHUNKS + 8
-                                            if len(self._frames) > max_preroll:
-                                                del self._frames[:-max_preroll]
+                                            # to start speaking in auto-stop mode so the mic can stay open without RAM growth.
+                                            if self._vad_enabled:
+                                                max_preroll = VAD_PRE_ROLL_CHUNKS + 8
+                                                if len(self._frames) > max_preroll:
+                                                    del self._frames[:-max_preroll]
                                             if rms >= 5.0 and rms < onset_thresh * 0.85:
                                                 noise_floor = (
                                                     0.85 * noise_floor
-                                                    + 0.15 * max(40.0, min(460.0, rms))
+                                                    + 0.15 * max(40.0, min(260.0, rms))
                                                 )
                                                 noise_peak = (
                                                     0.85 * noise_peak
                                                     + 0.15
                                                     * max(
-                                                        200.0,
-                                                        min(1550.0, float(peak)),
+                                                        180.0,
+                                                        min(880.0, float(peak)),
                                                     )
                                                 )
                                     else:
-                                        # Continuation threshold sits cleanly above the live ambient room noise floor
-                                        # so silence_streak increments immediately when the user stops speaking.
-                                        cont_thresh = max(
-                                            135.0,
-                                            noise_floor * 1.65,
-                                            noise_floor + 240.0,
+                                        # Continuation threshold sits cleanly above ambient room silence (~30-55 RMS)
+                                        # with a low ceiling (<=145 RMS / <=420 peak) so soft trailing words and
+                                        # quiet mid-sentence clauses (100-220 RMS) are always recognized as voice
+                                        # and never trigger an abrupt mid-sentence cutoff.
+                                        cont_thresh = min(
+                                            145.0,
+                                            max(
+                                                80.0,
+                                                noise_floor * 1.60,
+                                                noise_floor + 40.0,
+                                            ),
                                         )
-                                        cont_peak = max(
-                                            480,
-                                            int(noise_peak * 1.50),
-                                            int(noise_peak + 650),
+                                        cont_peak = min(
+                                            420,
+                                            max(
+                                                260,
+                                                int(noise_peak * 1.50),
+                                                int(noise_peak + 110),
+                                            ),
                                         )
-                                        strong_thresh = max(
-                                            220.0,
-                                            noise_floor * 2.10,
-                                            noise_floor + 360.0,
-                                        )
-                                        strong_peak = max(
-                                            700,
-                                            int(noise_peak * 1.85),
-                                            int(noise_peak + 950),
-                                        )
+                                        # Require BOTH rms and peak (or strong rms alone) so a 1ms mouse click
+                                        # with low RMS (<75) never resets silence_streak, while all genuine soft
+                                        # speech immediately resets the silence timer.
                                         is_voiced = (
-                                            rms >= cont_thresh and peak >= cont_peak
-                                        )
-                                        is_strong_voice = (
-                                            rms >= strong_thresh and peak >= strong_peak
+                                            (rms >= cont_thresh and peak >= cont_peak)
+                                            or rms >= cont_thresh * 1.35
                                         )
                                         if is_voiced:
-                                            if silence_streak == 0 or is_strong_voice:
-                                                silence_streak = 0
-                                                resume_streak = 0
-                                                self.speech_chunks += 1
-                                            else:
-                                                resume_streak += 1
-                                                if resume_streak >= 2:
-                                                    silence_streak = 0
-                                                    resume_streak = 0
-                                                    self.speech_chunks += 2
+                                            silence_streak = 0
+                                            resume_streak = 0
+                                            self.speech_chunks += 1
                                         else:
                                             resume_streak = 0
                                             silence_streak += 1
-                                            if rms >= 5.0 and rms < cont_thresh * 0.85:
-                                                noise_floor = (
-                                                    0.90 * noise_floor
-                                                    + 0.10 * max(40.0, min(680.0, rms))
+                                            # Quickly snap noise_floor down to true room silence during brief pauses
+                                            # so cont_thresh stays sensitive to soft speech.
+                                            if rms >= 5.0 and rms < noise_floor:
+                                                noise_floor = max(
+                                                    32.0,
+                                                    0.65 * noise_floor + 0.35 * rms,
                                                 )
-                                                noise_peak = (
-                                                    0.90 * noise_peak
-                                                    + 0.10
-                                                    * max(200.0, min(2500.0, float(peak)))
+                                            if peak >= 40 and peak < noise_peak:
+                                                noise_peak = max(
+                                                    110.0,
+                                                    0.65 * noise_peak + 0.35 * float(peak),
                                                 )
-                                            if self.speech_chunks >= 35:
-                                                req_silence = max(
-                                                    end_silence_chunks, 18
-                                                )  # 1.8s on long tangents
-                                            elif self.speech_chunks >= 18:
-                                                req_silence = max(
-                                                    end_silence_chunks, 15
-                                                )  # 1.5s on multi-clause turns
-                                            else:
-                                                req_silence = end_silence_chunks
-                                            if silence_streak >= req_silence:
+                                            # Respect the user's configured stt_silence_delay (default 0.8s = 8 chunks)
+                                            # without forcing a 2.2s floor after speech ends.
+                                            req_silence = end_silence_chunks
+                                            if self._vad_enabled and silence_streak >= req_silence:
                                                 # If total voiced audio was under 600ms (< 6 chunks), it was just a
                                                 # brief click, cough, or breath before the user started speaking;
                                                 # reset to waiting state instead of stopping the mic!
@@ -637,8 +626,11 @@ VK_MENU = 0x12
 VK_SHIFT = 0x10
 VK_LSHIFT = 0xA0
 VK_RSHIFT = 0xA1
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
 VK_LMENU = 0xA4
 VK_RMENU = 0xA5
+VK_RETURN = 0x0D
 VK_V = 0x56
 VK_C = 0x43
 VK_CAPITAL = 0x14
@@ -703,25 +695,265 @@ def set_clipboard_text(text: str) -> bool:
     return False
 
 
-def send_ctrl_v() -> None:
-    """Simulate Ctrl+V keystrokes to paste clipboard text into the focused window."""
-    # Wait briefly (up to 350ms) if Alt or Shift is still physically held from a shortcut
+def _restore_foreground_window(target_hwnd: int) -> bool:
+    """Restore keyboard focus to *target_hwnd* (used when pasting from the system tray menu)."""
+    try:
+        from audify.clipboard import attach_input_desktop
+        attach_input_desktop()
+    except Exception:
+        pass
+    if not target_hwnd or not _user32.IsWindow(target_hwnd):
+        return False
+    try:
+        fg = _user32.GetForegroundWindow()
+        if fg == target_hwnd:
+            return True
+        SW_RESTORE = 9
+        if _user32.IsIconic(target_hwnd):
+            _user32.ShowWindow(target_hwnd, SW_RESTORE)
+        cur_tid = _kernel32.GetCurrentThreadId()
+        fg_tid = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        tgt_tid = _user32.GetWindowThreadProcessId(target_hwnd, None)
+        attached_fg = False
+        attached_tgt = False
+        try:
+            if fg_tid and fg_tid != cur_tid:
+                attached_fg = bool(_user32.AttachThreadInput(cur_tid, fg_tid, True))
+            if tgt_tid and tgt_tid != cur_tid and tgt_tid != fg_tid:
+                attached_tgt = bool(_user32.AttachThreadInput(cur_tid, tgt_tid, True))
+            # Send a harmless Alt keyup so Win32 foreground lock permits SetForegroundWindow
+            _user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+            _user32.BringWindowToTop(target_hwnd)
+            _user32.SetForegroundWindow(target_hwnd)
+            _user32.SetFocus(target_hwnd)
+        finally:
+            if attached_tgt:
+                _user32.AttachThreadInput(cur_tid, tgt_tid, False)
+            if attached_fg:
+                _user32.AttachThreadInput(cur_tid, fg_tid, False)
+        return _user32.GetForegroundWindow() == target_hwnd
+    except Exception:
+        return False
+
+
+KEYEVENTF_UNICODE = 0x0004
+INPUT_KEYBOARD = 1
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUnion(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUnion)]
+
+
+_user32.SendInput.argtypes = [
+    wintypes.UINT,
+    ctypes.POINTER(_INPUT),
+    ctypes.c_int,
+]
+_user32.SendInput.restype = wintypes.UINT
+
+
+def _release_held_modifiers() -> None:
+    """Wait briefly for held modifiers to release and synthesize keyup events so text injection is clean."""
     t_wait = time.monotonic()
-    while (time.monotonic() - t_wait) < 0.35:
+    while (time.monotonic() - t_wait) < 0.60:
         alt_down = bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
         shift_down = bool(_user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
-        if not alt_down and not shift_down:
+        ctrl_down = bool(_user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+        win_down = bool(
+            (_user32.GetAsyncKeyState(0x5B) & 0x8000)
+            or (_user32.GetAsyncKeyState(0x5C) & 0x8000)
+        )
+        if not alt_down and not shift_down and not ctrl_down and not win_down:
             break
         time.sleep(0.015)
 
-    for vk_mod in (VK_MENU, VK_LMENU, VK_RMENU, VK_SHIFT, VK_LSHIFT, VK_RSHIFT):
+    for vk_mod in (
+        VK_CONTROL,
+        VK_LCONTROL,
+        VK_RCONTROL,
+        VK_MENU,
+        VK_LMENU,
+        VK_RMENU,
+        VK_SHIFT,
+        VK_LSHIFT,
+        VK_RSHIFT,
+    ):
         _user32.keybd_event(vk_mod, 0, KEYEVENTF_KEYUP, 0)
+    if (_user32.GetAsyncKeyState(0x5B) & 0x8000) or (
+        _user32.GetAsyncKeyState(0x5C) & 0x8000
+    ):
+        _user32.keybd_event(0xFF, 0, KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(0x5B, 0, KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(0x5C, 0, KEYEVENTF_KEYUP, 0)
     time.sleep(0.02)
+
+
+def send_unicode_text(text: str) -> bool:
+    """Type *text* directly into the focused window via Win32 SendInput(KEYEVENTF_UNICODE) without touching the clipboard."""
+    if not text:
+        return True
+    try:
+        from audify.clipboard import attach_input_desktop
+
+        attach_input_desktop()
+    except Exception:
+        pass
+    _release_held_modifiers()
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_u16 = normalized.encode("utf-16-le")
+    if not raw_u16:
+        return True
+    code_units = struct.unpack(f"<{len(raw_u16) // 2}H", raw_u16)
+    cb_size = ctypes.sizeof(_INPUT)
+
+    # Send in batches of 96 UTF-16 code units (192 INPUT events) so message queues never overflow
+    batch_size = 96
+    for start in range(0, len(code_units), batch_size):
+        chunk = code_units[start : start + batch_size]
+        arr_type = _INPUT * (len(chunk) * 2)
+        inputs = arr_type()
+        for idx, cu in enumerate(chunk):
+            i_down = idx * 2
+            i_up = i_down + 1
+            inputs[i_down].type = INPUT_KEYBOARD
+            inputs[i_ub := i_up].type = INPUT_KEYBOARD
+            if cu == 0x000A:  # '\n'
+                inputs[i_down].u.ki.wVk = VK_RETURN
+                inputs[i_down].u.ki.wScan = 0
+                inputs[i_down].u.ki.dwFlags = 0
+                inputs[i_ub].u.ki.wVk = VK_RETURN
+                inputs[i_ub].u.ki.wScan = 0
+                inputs[i_ub].u.ki.dwFlags = KEYEVENTF_KEYUP
+            else:
+                inputs[i_down].u.ki.wVk = 0
+                inputs[i_down].u.ki.wScan = cu
+                inputs[i_down].u.ki.dwFlags = KEYEVENTF_UNICODE
+                inputs[i_ub].u.ki.wVk = 0
+                inputs[i_ub].u.ki.wScan = cu
+                inputs[i_ub].u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        sent = _user32.SendInput(len(inputs), inputs, cb_size)
+        if sent == 0:
+            return False
+        if start + batch_size < len(code_units):
+            time.sleep(0.008)
+    return True
+
+
+def send_ctrl_v(expected_clipboard_text: str | None = None) -> None:
+    """Simulate Ctrl+V keystrokes to paste clipboard text into the focused window."""
+    try:
+        from audify.clipboard import attach_input_desktop
+        attach_input_desktop()
+    except Exception:
+        pass
+    _release_held_modifiers()
+    if expected_clipboard_text:
+        set_clipboard_text(expected_clipboard_text)
     _user32.keybd_event(VK_CONTROL, 0, 0, 0)
     _user32.keybd_event(VK_V, 0, 0, 0)
-    time.sleep(0.015)
+    time.sleep(0.02)
     _user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
     _user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+
+def send_enter_key() -> None:
+    """Simulate pressing the Enter (Return) key in the focused window."""
+    try:
+        from audify.clipboard import attach_input_desktop
+        attach_input_desktop()
+    except Exception:
+        pass
+    time.sleep(0.035)
+    for vk_mod in (VK_CONTROL, VK_MENU, VK_LMENU, VK_RMENU, VK_SHIFT, VK_LSHIFT, VK_RSHIFT):
+        _user32.keybd_event(vk_mod, 0, KEYEVENTF_KEYUP, 0)
+    _user32.keybd_event(VK_RETURN, 0, 0, 0)
+    time.sleep(0.018)
+    _user32.keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0)
+
+
+_TRAILING_ENTER_PHRASE_RE = re.compile(
+    r"(?P<sep>[\s,.;:!?।—–-]+)"
+    r"(?:send\s+it|send\s+message|press\s+enter|hit\s+enter|push\s+enter|click\s+enter|প্রেস\s+এন্টার|এন্টার\s+দাও)"
+    r"[\s,.;:!?।]*$",
+    re.IGNORECASE,
+)
+
+_STANDALONE_ENTER_ONLY_RE = re.compile(
+    r"^(?:press\s+enter|hit\s+enter|push\s+enter|click\s+enter|প্রেস\s+এন্টার|এন্টার\s+দাও)[\s,.;:!?।]*$",
+    re.IGNORECASE,
+)
+
+_TRAILING_PUNCT_ENTER_RE = re.compile(
+    r"(?P<punct>[.,;:!?।])\s+enter[\s,.;:!?।]*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_trailing_enter_command(text: str) -> tuple[str, bool]:
+    """Check if *text* ends with a spoken Enter trigger ('send it', 'press enter', 'hit enter', or '. Enter').
+
+    Only triggers when the keyword is at the very end of the dictation.
+    If the entire dictation is solely 'Send it.', keeps 'Send it.' as the message and presses Enter.
+    Returns ``(cleaned_text_without_keyword, should_press_enter)``.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", False
+
+    if _STANDALONE_ENTER_ONLY_RE.match(raw):
+        return "", True
+
+    if re.match(r"^send\s+it[\s,.;:!?।]*$", raw, flags=re.IGNORECASE):
+        return raw, True
+
+    m = _TRAILING_ENTER_PHRASE_RE.search(raw)
+    if m and m.start() > 0:
+        prefix = raw[: m.start()].rstrip()
+        sep = m.group("sep") or ""
+        if prefix and any(ch in sep for ch in ".!?।") and prefix[-1] not in ".!?।":
+            for ch in (".", "!", "?", "।"):
+                if ch in sep:
+                    prefix += ch
+                    break
+        if prefix:
+            return prefix.strip(), True
+
+    m2 = _TRAILING_PUNCT_ENTER_RE.search(raw)
+    if m2 and m2.start() > 0:
+        prefix = raw[: m2.start()].rstrip()
+        punct = m2.group("punct") or ""
+        if prefix and punct in ".!?।" and prefix[-1] not in ".!?।":
+            prefix += punct
+        if prefix:
+            return prefix.strip(), True
+
+    return raw, False
 
 
 def send_ctrl_c() -> None:
@@ -931,8 +1163,14 @@ class DictationCorrectionLearner:
             self.last_probe_time = time.monotonic()
             sel = (get_clipboard_text() or "").strip()
 
-            if isinstance(prev_clip, str) and prev_clip and prev_clip != sel:
-                set_clipboard_text(prev_clip)
+            if isinstance(prev_clip, str) and prev_clip != sel:
+                if prev_clip:
+                    set_clipboard_text(prev_clip)
+                elif _user32.OpenClipboard(None):
+                    try:
+                        _user32.EmptyClipboard()
+                    finally:
+                        _user32.CloseClipboard()
                 if self.daemon is not None:
                     try:
                         self.daemon._clip_listener._last_text = prev_clip
@@ -1774,6 +2012,8 @@ _WISPR_ERROR_KEYS: tuple[str, ...] = (
     "TranscriptionError",
     "NoInternet",
     "WeeklyWordsLimitReached",
+    "TranscriptCancelledDetailed",
+    "TranscriptCancelled",
     "HelperLoadingError",
     "HelperNotReady",
     "HelperPersistentFailure",
@@ -2191,6 +2431,279 @@ def resolve_groq_api_key(daemon: TTSDaemon | None = None) -> str:
     return ""
 
 
+def resolve_gemini_api_key(daemon: TTSDaemon | None = None) -> str:
+    """Resolve the user's Gemini API key from config, process env, or HKCU\\Environment."""
+    if daemon is not None:
+        try:
+            with daemon._config_lock:
+                k = str(daemon.config.get("gemini_api_key", "")).strip()
+            if k:
+                return k
+        except Exception:
+            pass
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        env_k = os.environ.get(env_name, "").strip()
+        if env_k:
+            return env_k
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as reg_key:
+                for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                    try:
+                        val, _ = winreg.QueryValueEx(reg_key, env_name)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return ""
+
+
+import base64
+import http.client
+import ssl
+
+_groq_conn_lock = threading.Lock()
+_groq_warm_conn: http.client.HTTPSConnection | None = None
+_groq_warm_ts: float = 0.0
+_groq_ssl_ctx: ssl.SSLContext | None = None
+
+_gemini_conn_lock = threading.Lock()
+_gemini_warm_conn: http.client.HTTPSConnection | None = None
+_gemini_warm_ts: float = 0.0
+
+
+def prewarm_gemini_connection() -> None:
+    """Establish and cache a TLS 1.3 connection to generativelanguage.googleapis.com for Bengali ASR."""
+    global _gemini_warm_conn, _gemini_warm_ts, _groq_ssl_ctx
+    with _gemini_conn_lock:
+        if _gemini_warm_conn is not None and (time.monotonic() - _gemini_warm_ts) < 40.0:
+            return
+        old_conn = _gemini_warm_conn
+        _gemini_warm_conn = None
+    if old_conn is not None:
+        try:
+            old_conn.close()
+        except Exception:
+            pass
+    try:
+        if _groq_ssl_ctx is None:
+            _groq_ssl_ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(
+            "generativelanguage.googleapis.com", timeout=15.0, context=_groq_ssl_ctx
+        )
+        conn.connect()
+        with _gemini_conn_lock:
+            if _gemini_warm_conn is None:
+                _gemini_warm_conn = conn
+                _gemini_warm_ts = time.monotonic()
+            else:
+                conn.close()
+    except Exception:
+        pass
+
+
+def prewarm_groq_connection() -> None:
+    """Establish and cache a TLS 1.3 connection to api.groq.com while the user is speaking.
+
+    Eliminates the ~350-500ms cold DNS + TCP + TLS handshake overhead after speech ends.
+    """
+    global _groq_warm_conn, _groq_warm_ts, _groq_ssl_ctx
+    threading.Thread(
+        target=prewarm_gemini_connection, daemon=True, name="gemini-tls-prewarm"
+    ).start()
+    with _groq_conn_lock:
+        if _groq_warm_conn is not None and (time.monotonic() - _groq_warm_ts) < 40.0:
+            return
+        old_conn = _groq_warm_conn
+        _groq_warm_conn = None
+    if old_conn is not None:
+        try:
+            old_conn.close()
+        except Exception:
+            pass
+    try:
+        if _groq_ssl_ctx is None:
+            _groq_ssl_ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(
+            "api.groq.com", timeout=15.0, context=_groq_ssl_ctx
+        )
+        conn.connect()
+        with _groq_conn_lock:
+            if _groq_warm_conn is None:
+                _groq_warm_conn = conn
+                _groq_warm_ts = time.monotonic()
+            else:
+                conn.close()
+    except Exception:
+        pass
+
+
+def _post_groq_multipart(
+    body: bytes, headers: dict[str, str]
+) -> tuple[int, bytes]:
+    """Send *body* to api.groq.com reusing the pre-warmed TLS socket when available."""
+    global _groq_warm_conn, _groq_warm_ts, _groq_ssl_ctx
+    conn: http.client.HTTPSConnection | None = None
+    with _groq_conn_lock:
+        if _groq_warm_conn is not None and (time.monotonic() - _groq_warm_ts) < 50.0:
+            conn = _groq_warm_conn
+            _groq_warm_conn = None
+
+    req_headers = dict(headers)
+    req_headers["Content-Length"] = str(len(body))
+    req_headers["Connection"] = "keep-alive"
+
+    for attempt in range(2):
+        if conn is None:
+            if _groq_ssl_ctx is None:
+                _groq_ssl_ctx = ssl.create_default_context()
+            conn = http.client.HTTPSConnection(
+                "api.groq.com", timeout=15.0, context=_groq_ssl_ctx
+            )
+        try:
+            conn.request(
+                "POST",
+                "/openai/v1/audio/transcriptions",
+                body=body,
+                headers=req_headers,
+            )
+            resp = conn.getresponse()
+            raw_data = resp.read()
+            status = resp.status
+            if status == 200:
+                with _groq_conn_lock:
+                    if _groq_warm_conn is None:
+                        _groq_warm_conn = conn
+                        _groq_warm_ts = time.monotonic()
+                    else:
+                        conn.close()
+            else:
+                conn.close()
+            return status, raw_data
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+            if attempt == 1:
+                raise
+    return 500, b""
+
+
+def _normalize_bengali_unicode(text: str) -> str:
+    """Repair Whisper byte-level BPE Bengali codepoint glitches such as unassigned U+09B5 ('঵')."""
+    if not text:
+        return ""
+    # Whisper's byte-BPE decoder often emits U+09B5 ('঵') or Assamese 'ৱ' ('\u09f1') when
+    # transliterating 'w'/'v' (e.g. '঵িন্দোস' / '঵িন্ডোজ' for 'উইন্ডোজ').
+    fixed = re.sub(r"[\u09b5\u09f0\u09f1]\u09bf", "উই", text)
+    fixed = fixed.replace("\u09b5", "উ").replace("\u09f1", "ওয়")
+    return fixed
+
+
+def transcribe_with_gemini_audio(
+    wav_bytes: bytes,
+    api_key: str,
+    vocab: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Transcribe *wav_bytes* using Gemini Flash native audio for high-accuracy Bangladeshi Bengali & Banglish."""
+    global _gemini_warm_conn, _gemini_warm_ts, _groq_ssl_ctx
+    key = (api_key or "").strip()
+    if not key or not wav_bytes:
+        return False, "No Gemini API key or audio bytes."
+
+    b64_audio = base64.b64encode(wav_bytes).decode("ascii")
+    vocab_hint = ""
+    if vocab:
+        terms = [str(v).strip() for v in list(vocab.values())[:25] if str(v).strip()]
+        if terms:
+            vocab_hint = f" Known custom terms/names: {', '.join(terms)}."
+
+    instruction = (
+        "Transcribe this audio accurately and verbatim in its original spoken language "
+        "(such as standard Bangladeshi বাংলা, English, or Banglish). "
+        "Write Bengali words with natural, proper বাংলা spelling and punctuation (e.g. প্রথমটা, দ্বিতীয়টা, তৃতীয়টা, কন্ট্রোল, উইন্ডোজ, স্পেস). "
+        "If the audio is silent or contains no speech, output nothing. "
+        "Output ONLY the transcribed text, with no commentary or quotes."
+        + vocab_hint
+    )
+    payload_bytes = json.dumps(
+        {
+            "contents": [
+                {
+                    "parts": [
+                        {"inline_data": {"mime_type": "audio/wav", "data": b64_audio}},
+                        {"text": instruction},
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.0,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+    ).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(payload_bytes)),
+        "Connection": "keep-alive",
+    }
+
+    for model_name in ("gemini-3.1-flash-lite", "gemini-2.5-flash"):
+        conn: http.client.HTTPSConnection | None = None
+        with _gemini_conn_lock:
+            if (
+                _gemini_warm_conn is not None
+                and (time.monotonic() - _gemini_warm_ts) < 50.0
+            ):
+                conn = _gemini_warm_conn
+                _gemini_warm_conn = None
+        if conn is None:
+            if _groq_ssl_ctx is None:
+                _groq_ssl_ctx = ssl.create_default_context()
+            conn = http.client.HTTPSConnection(
+                "generativelanguage.googleapis.com",
+                timeout=15.0,
+                context=_groq_ssl_ctx,
+            )
+        try:
+            conn.request(
+                "POST",
+                f"/v1beta/models/{model_name}:generateContent?key={key}",
+                body=payload_bytes,
+                headers=headers,
+            )
+            resp = conn.getresponse()
+            raw = resp.read()
+            if resp.status == 200:
+                with _gemini_conn_lock:
+                    if _gemini_warm_conn is None:
+                        _gemini_warm_conn = conn
+                        _gemini_warm_ts = time.monotonic()
+                    else:
+                        conn.close()
+                data = json.loads(raw.decode("utf-8", errors="replace"))
+                cands = data.get("candidates") or []
+                if cands:
+                    parts = (cands[0].get("content") or {}).get("parts") or []
+                    out_txt = "".join(str(p.get("text", "")) for p in parts).strip()
+                    return True, _normalize_bengali_unicode(out_txt)
+            else:
+                conn.close()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return False, "Gemini Bengali audio transcription unavailable."
+
+
 def transcribe_with_groq(
     wav_path: str,
     api_key: str,
@@ -2250,7 +2763,8 @@ def transcribe_with_groq(
         "Hello Yasir, Yeamin Sheikh here with Ishan, Shajib, Shoaib, Shib, Sifat, Shifat, and Sabrina. "
         "Let's use the Groq API key with Whisper Large v3, Wispr Flow, Antigravity, Helium, Chrome, "
         "Raycast, AdsPower, Audify, Agent-S, Ultra Studio, VEO 3.1, Nano Banana, Gemini, "
-        "Python, PowerShell, GitHub, VS Code, Supabase, Flutter, and Windows 11. বাংলা এবং हिन्दी।"
+        "Python, PowerShell, GitHub, VS Code, Supabase, Flutter, and Windows 11. "
+        "বাংলা ভাষায় কথা বলছি: প্রথমটা, দ্বিতীয়টা, তৃতীয়টা, ডাবল কন্ট্রোল, উইন্ডোজ, স্পেস।"
         + (f" {', '.join(vocab_terms[:30])}." if vocab_terms else "")
     ).strip()
 
@@ -2283,19 +2797,20 @@ def transcribe_with_groq(
         parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
         body = b"".join(parts)
 
-        req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "User-Agent": "Audify/2.9.24",
-            },
-            method="POST",
-        )
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "Audify/2.9.25",
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15.0) as resp:
-                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            status_code, resp_bytes = _post_groq_multipart(body, headers)
+            if status_code != 200:
+                err_body = resp_bytes.decode("utf-8", errors="replace")[:200]
+                last_err = f"Groq HTTP {status_code}: {err_body}"
+                if status_code == 429 and cur_model != models_to_try[-1]:
+                    continue
+                break
+            payload = json.loads(resp_bytes.decode("utf-8", errors="replace"))
             _hallucination_phrases = {
                 "subtitles by the amara.org community",
                 "amara.org",
@@ -2330,12 +2845,40 @@ def transcribe_with_groq(
                     comp_ratio = float(seg.get("compression_ratio", 1.0) or 1.0)
                     if no_speech_prob > 0.70 and avg_logprob < -0.8:
                         continue
-                    if comp_ratio > 2.6:
+                    is_non_ascii = any(ord(c) > 127 for c in seg_txt)
+                    max_comp_ratio = 3.8 if is_non_ascii else 2.6
+                    if comp_ratio > max_comp_ratio:
                         continue
                     kept_parts.append(seg_txt)
                 text = " ".join(kept_parts).strip()
             else:
                 text = str(payload.get("text", "")).strip()
+            text = _normalize_bengali_unicode(text)
+            detected_lang = str(payload.get("language", "") or "").strip().lower()
+            is_bengali_or_indic = (
+                detected_lang
+                in (
+                    "bengali",
+                    "bn",
+                    "assamese",
+                    "as",
+                    "hindi",
+                    "hi",
+                    "urdu",
+                    "ur",
+                    "nepali",
+                    "ne",
+                )
+                or bool(re.search(r"[\u0900-\u09FF]", text))
+            )
+            if is_bengali_or_indic:
+                gemini_key = resolve_gemini_api_key()
+                if gemini_key:
+                    ok_gem, gem_txt = transcribe_with_gemini_audio(
+                        wav_bytes, gemini_key, vocab=vocab
+                    )
+                    if ok_gem and gem_txt:
+                        text = gem_txt
             text = re.sub(
                 r"(?:\s*[.!,?]?\s*\b(?:thank you for watching|thanks for watching|subtitles by [^.!?]+)\s*[.!,?]*)+$",
                 "",
@@ -2381,6 +2924,8 @@ class BarkCleanController:
         self.learner = DictationCorrectionLearner(daemon=daemon)
         self.hud = DictationVisualizerHUD(self)
         self.last_dictated: str = ""
+        self.dictation_mode: str = "auto"  # "auto" (Double Ctrl), "ptt" (Hold Ctrl+Win), or "handsfree" (Ctrl+Win+Space)
+        self._last_wav_untranscribed: bool = False
         self._lock = threading.Lock()
         self._spawn_lock = threading.Lock()
         self._transcribing = False
@@ -2388,7 +2933,11 @@ class BarkCleanController:
         self._active_req_id: int = 0
         self._last_toggle_time = 0.0
         self._last_paste_time = 0.0
+        self.last_clipboard_write_time: float = 0.0
         self._on_complete_cb: Callable[[bool, str], None] | None = None
+
+        self.last_dictated = self._load_persisted_last_dictated()
+        self.dictation_history: list[str] = self._load_persisted_history()
 
         # Sidecar subprocess state (Bark 3.0 Clean is NEVER pre-warmed at startup or idle;
         # it is loaded strictly on demand if Tier 2 Groq fails, and unloaded immediately after)
@@ -2399,54 +2948,6 @@ class BarkCleanController:
         self._last_result: dict | None = None
         self._idle_timer: threading.Timer | None = None
         self._startup_timer: threading.Timer | None = None
-
-        # Watch Wispr Flow (Tier 1) for failures only when Wispr Flow integration is enabled
-        if self.daemon is not None and _is_wispr_flow_enabled():
-            threading.Thread(
-                target=self._wispr_watchdog_loop,
-                daemon=True,
-                name="wispr-flow-watchdog",
-            ).start()
-
-    def _wispr_watchdog_loop(self) -> None:
-        """Monitor Wispr Flow strictly for error notifications when Audify is in standalone mode.
-
-        Manual Ctrl+Win or Ctrl+Win+Space sessions belong to regular Wispr Flow dictation
-        and are never intercepted or auto-stopped here.
-        """
-        cfg_path = get_wispr_config_path()
-        last_mtime = 0.0
-        last_err_ts, _ = get_wispr_latest_error()
-        if os.path.exists(cfg_path):
-            try:
-                last_mtime = os.path.getmtime(cfg_path)
-            except Exception:
-                pass
-        lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
-
-        while True:
-            time.sleep(0.5)
-            if os.path.exists(lock_file):
-                continue
-            if not self.is_enabled or self.is_busy:
-                continue
-            try:
-                if not os.path.exists(cfg_path):
-                    continue
-                mtime = os.path.getmtime(cfg_path)
-                if mtime <= last_mtime:
-                    continue
-                last_mtime = mtime
-                err_ts, err_key = get_wispr_latest_error()
-                now_ms = int(time.time() * 1000)
-                if err_ts > last_err_ts and abs(now_ms - err_ts) <= 8000:
-                    last_err_ts = err_ts
-                    print(
-                        f"[STT] Detected Wispr Flow failure ({err_key}); switching to Groq whisper-large-v3 fallback..."
-                    )
-                    self.start_dictation()
-            except Exception:
-                pass
 
     @property
     def is_enabled(self) -> bool:
@@ -2563,63 +3064,79 @@ class BarkCleanController:
         return True
 
     def _resume_media_if_standalone(self) -> None:
-        """Resume any external video/audio paused by standalone dictation once dictation ends."""
+        """Restore any background audio sessions that were ducked to 50% during dictation."""
         try:
-            lock_file = os.path.join(tempfile.gettempdir(), "audify_voiceloop.lock")
-            if os.path.exists(lock_file):
-                return
-            from audify.voice_loop import (
-                _find_audify_pids,
-                _resume_external_system_audio_if_paused_by_us,
-            )
+            from audify.engine import restore_background_audio
 
-            self_pids = {os.getpid()} | _find_audify_pids() | get_wispr_flow_pids()
-            _resume_external_system_audio_if_paused_by_us(
-                self_pids, delay_before_s=0.5
-            )
+            threading.Thread(
+                target=restore_background_audio,
+                daemon=True,
+                name="restore-ducked-audio",
+            ).start()
         except Exception:
             pass
 
     def start_dictation(
-        self, on_complete: Callable[[bool, str], None] | None = None
+        self,
+        on_complete: Callable[[bool, str], None] | None = None,
+        auto_stop_on_silence: bool = True,
+        mode: str = "auto",
     ) -> bool:
-        """Start capturing microphone audio with automatic end-of-speech detection."""
+        """Start capturing microphone audio in 'auto', 'ptt', or 'handsfree' mode."""
         if not self.is_enabled or self.recorder.is_recording or self._transcribing:
             return False
         try:
             self._on_complete_cb = on_complete
-            silence_delay_s = 1.0
+            self.dictation_mode = mode
+            silence_delay_s = 0.8
             if self.daemon is not None:
                 self.daemon.stop_audio()
                 with self.daemon._config_lock:
                     silence_delay_s = float(
-                        self.daemon.config.get("stt_silence_delay", 1.0)
+                        self.daemon.config.get("stt_silence_delay", 0.8)
                     )
                 try:
                     self.daemon._clip_listener.set_recording_escape_guard(True)
                 except Exception:
                     pass
-            try:
-                from audify.voice_loop import (
-                    _find_audify_pids,
-                    _pause_external_system_audio_if_playing,
-                )
-
-                self_pids = {os.getpid()} | _find_audify_pids() | get_wispr_flow_pids()
-                _pause_external_system_audio_if_playing(self_pids, wait_after_s=0.15)
-            except Exception:
-                pass
+            no_speech_timeout_s = 8.0 if auto_stop_on_silence else 300.0
             self.recorder.start(
                 on_auto_stop=self._on_vad_auto_stop,
-                auto_stop_on_silence=True,
+                auto_stop_on_silence=auto_stop_on_silence,
                 silence_delay_s=silence_delay_s,
+                no_speech_timeout_s=no_speech_timeout_s,
             )
+
+            def _async_duck_and_prewarm() -> None:
+                try:
+                    from audify.engine import duck_background_audio
+
+                    duck_background_audio(ratio=0.50)
+                except Exception:
+                    pass
+                prewarm_groq_connection()
+
+            threading.Thread(
+                target=_async_duck_and_prewarm,
+                daemon=True,
+                name="groq-tls-prewarm",
+            ).start()
             self.hud.clear_status()
             self.hud.show()
             if self.daemon is not None:
-                self.daemon._set_status("Listening...", speaking=False)
+                label = (
+                    "Listening (Push-to-Talk)..."
+                    if mode == "ptt"
+                    else (
+                        "Listening (Hands-Free)..."
+                        if mode == "handsfree"
+                        else "Listening..."
+                    )
+                )
+                self.daemon._set_status(label, speaking=False)
             return True
         except Exception as e:
+            self._resume_media_if_standalone()
             self.hud.hide()
             if self.daemon is not None:
                 try:
@@ -2629,6 +3146,40 @@ class BarkCleanController:
                 self.daemon._notify_error(f"Microphone error: {e}")
                 self.daemon._set_status("Ready", speaking=False)
             return False
+
+    def promote_to_handsfree(self) -> None:
+        """Promote an active Push-to-Talk or Auto recording session into Hands-Free mode."""
+        if not self.recorder.is_recording:
+            return
+        self.dictation_mode = "handsfree"
+        with self.recorder._lock:
+            self.recorder._vad_enabled = False
+            self.recorder._no_speech_timeout_s = 300.0
+        if self.daemon is not None:
+            self.daemon._set_status("Listening (Hands-Free)...", speaking=False)
+
+    def toggle_handsfree_dictation(
+        self, on_complete: Callable[[bool, str], None] | None = None
+    ) -> str:
+        """Start or stop Hands-Free dictation (Ctrl+Win+Space) with auto-stop disabled."""
+        if not self.is_enabled:
+            return "disabled"
+        now = time.monotonic()
+        if (now - self._last_toggle_time) < 0.22:
+            return "busy"
+        self._last_toggle_time = now
+        if self._transcribing:
+            return "busy"
+        if not self.recorder.is_recording:
+            self.start_dictation(
+                on_complete=on_complete,
+                auto_stop_on_silence=False,
+                mode="handsfree",
+            )
+            return "recording"
+        else:
+            self.stop_and_transcribe(on_complete=on_complete)
+            return "transcribing"
 
     def _on_vad_auto_stop(self, reason: str) -> None:
         """Called by Win32MicRecorder when VAD detects end of speech or silence timeout."""
@@ -2682,20 +3233,44 @@ class BarkCleanController:
                 had_speech = (
                     self.recorder.speech_detected
                     and getattr(self.recorder, "speech_chunks", 0) >= 2
+                ) or (
+                    self.dictation_mode in ("ptt", "handsfree")
+                    and self.recorder.speech_detected
                 )
                 duration_s = self.recorder.stop_and_save(wav_path)
+                self._resume_media_if_standalone()
                 if self._cancel_seq != my_seq:
                     return
                 if not had_speech or duration_s < 0.25:
                     out_msg = "No speech detected."
                     return
 
+                # Save a persistent backup of the recorded WAV before transcription so
+                # if transcription is interrupted or fails, Alt+Shift+Z can still recover it
+                try:
+                    backup_wav = self._last_wav_backup_path()
+                    shutil.copyfile(wav_path, backup_wav)
+                    self._last_wav_untranscribed = True
+                except Exception:
+                    pass
+
                 ok, out_msg = self.transcribe_file(wav_path, cancel_seq=my_seq)
                 if self._cancel_seq != my_seq:
                     return
                 if ok and out_msg:
-                    self._copy_and_paste(out_msg)
+                    self._last_wav_untranscribed = False
+                    clean_msg, auto_enter = _extract_trailing_enter_command(out_msg)
+                    out_msg = clean_msg
+                    # Hide the listener HUD immediately as soon as transcription returns
+                    self.hud.hide()
+                    if clean_msg:
+                        self._save_persisted_last_dictated(clean_msg)
+                        self._copy_and_paste(clean_msg, press_enter_after=auto_enter)
+                    elif auto_enter:
+                        send_enter_key()
+                        out_msg = "[Enter]"
                 elif ok and not out_msg:
+                    self._last_wav_untranscribed = False
                     out_msg = "No speech detected."
                     ok = False
                 elif not ok and out_msg and out_msg != "Dictation cancelled.":
@@ -2837,45 +3412,238 @@ class BarkCleanController:
             # Always unload Bark 3.0 Clean immediately after last-resort fallback so ~500 MB RAM never stays resident
             self.shutdown()
 
-    def _copy_and_paste(self, text: str) -> None:
-        """Copy *text* to clipboard without triggering TTS and paste via Ctrl+V."""
-        self.last_dictated = text
+    def _state_dir(self) -> str:
+        base = os.path.dirname(get_bark_dir())
+        try:
+            os.makedirs(base, exist_ok=True)
+        except Exception:
+            pass
+        return base
+
+    def _last_dictated_path(self) -> str:
+        return os.path.join(self._state_dir(), "last_dictated.txt")
+
+    def _history_path(self) -> str:
+        return os.path.join(self._state_dir(), "dictation_history.json")
+
+    def _last_wav_backup_path(self) -> str:
+        return os.path.join(self._state_dir(), "last_recording.wav")
+
+    def _load_persisted_history(self) -> list[str]:
+        """Load the rolling 20-item transcript history from disk."""
+        items: list[str] = []
+        try:
+            hp = self._history_path()
+            if os.path.exists(hp):
+                with open(hp, "r", encoding="utf-8", errors="replace") as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    for entry in raw:
+                        txt = str(entry or "").strip()
+                        if txt and txt not in items:
+                            items.append(txt)
+                        if len(items) >= 20:
+                            break
+        except Exception:
+            pass
+        if self.last_dictated and self.last_dictated not in items:
+            items.insert(0, self.last_dictated)
+        return items[:20]
+
+    def _load_persisted_last_dictated(self) -> str:
+        """Load the most recent transcript from disk or config."""
+        try:
+            p = self._last_dictated_path()
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    txt = f.read().strip()
+                if txt:
+                    return txt
+        except Exception:
+            pass
         if self.daemon is not None:
-            # Mark clipboard listener's last text and clear last_ctrl_c_time so
-            # Audify's TTS reader never reads your own dictated text aloud
-            self.daemon.last_ctrl_c_time = 0.0
             try:
-                self.daemon._clip_listener._last_text = text
-                self.daemon._clip_listener._last_update_time = time.monotonic()
+                with self.daemon._config_lock:
+                    cfg_txt = str(self.daemon.config.get("last_dictated", "")).strip()
+                if cfg_txt:
+                    return cfg_txt
             except Exception:
                 pass
+        return ""
 
-        if set_clipboard_text(text):
-            send_ctrl_v()
+    def _save_persisted_last_dictated(self, text: str) -> None:
+        """Persist *text* to memory and the rolling 20-item disk history."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        self.last_dictated = clean
+        with self._lock:
+            existing = [t for t in getattr(self, "dictation_history", []) if t != clean]
+            self.dictation_history = [clean] + existing[:19]
+            hist_snapshot = list(self.dictation_history)
+        try:
+            with open(self._last_dictated_path(), "w", encoding="utf-8") as f:
+                f.write(clean)
+        except Exception:
+            pass
+        try:
+            with open(self._history_path(), "w", encoding="utf-8") as f:
+                json.dump(hist_snapshot, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    @property
+    def has_recoverable_audio(self) -> bool:
+        """Return True if an untranscribed backup WAV from an interrupted dictation exists."""
+        return bool(
+            self._last_wav_untranscribed
+            and os.path.exists(self._last_wav_backup_path())
+        )
+
+    def _copy_and_paste(
+        self,
+        text: str,
+        target_hwnd: int | None = None,
+        delay_before_paste_s: float = 0.0,
+        show_hud_confirm: bool = False,
+        press_enter_after: bool = False,
+    ) -> None:
+        """Type *text* directly into the focused window without touching or overwriting the Windows clipboard."""
+        self._save_persisted_last_dictated(text)
+        if delay_before_paste_s > 0.0:
+            time.sleep(delay_before_paste_s)
+        if target_hwnd:
+            _restore_foreground_window(target_hwnd)
+            time.sleep(0.06)
+
+        injected = send_unicode_text(text)
+        if not injected:
+            # Fallback only if SendInput was blocked by UIPI (e.g. elevated Administrator window):
+            # temporarily paste via Ctrl+V and immediately restore the user's original clipboard.
+            prev_clip = get_clipboard_text()
+            self.last_clipboard_write_time = time.monotonic()
+            if self.daemon is not None:
+                self.daemon.last_ctrl_c_time = 0.0
+                try:
+                    self.daemon._clip_listener._last_text = text
+                    self.daemon._clip_listener._last_update_time = time.monotonic()
+                except Exception:
+                    pass
+            if set_clipboard_text(text):
+                self.last_clipboard_write_time = time.monotonic()
+                send_ctrl_v(expected_clipboard_text=text)
+                time.sleep(0.085)
+                self.last_clipboard_write_time = time.monotonic()
+                if prev_clip:
+                    set_clipboard_text(prev_clip)
+                elif _user32.OpenClipboard(None):
+                    try:
+                        _user32.EmptyClipboard()
+                    finally:
+                        _user32.CloseClipboard()
+                if self.daemon is not None:
+                    self.daemon.last_ctrl_c_time = 0.0
+                    try:
+                        self.daemon._clip_listener._last_text = prev_clip or ""
+                        self.daemon._clip_listener._last_update_time = time.monotonic()
+                    except Exception:
+                        pass
+                injected = True
+
+        if injected:
+            if press_enter_after:
+                send_enter_key()
             self.learner.record_dictation(text)
+            if show_hud_confirm:
+                self.hud.show_toast("✓  Pasted last transcript", duration_s=1.8)
             if self.daemon is not None:
                 self.daemon._notify_state_change()
                 preview = text if len(text) <= 70 else text[:67] + "..."
-                print(f"[STT] Dictated ({len(text)} chars): {preview}")
+                try:
+                    print(f"[STT] Dictated ({len(text)} chars): {preview}")
+                except Exception:
+                    pass
 
-    def paste_last_dictation(self) -> bool:
-        """Re-paste the most recently dictated text into the focused input field."""
-        if not self.is_enabled:
-            return False
+    def paste_last_dictation(
+        self,
+        from_tray: bool = False,
+        target_hwnd: int | None = None,
+    ) -> bool:
+        """Re-paste the most recently dictated text (or recover an interrupted recording) into the focused input field."""
         now = time.monotonic()
-        if (now - self._last_paste_time) < 0.25:
+        if (now - self._last_paste_time) < 0.40:
             return False
         self._last_paste_time = now
 
-        text = self.last_dictated
+        # If currently recording, stop and transcribe immediately
+        if self.recorder.is_recording and not self._transcribing:
+            self.stop_and_transcribe()
+            return True
+
+        # If the last recording was interrupted before transcription completed, transcribe it now
+        if self.has_recoverable_audio and not self._transcribing:
+            def _recover_worker() -> None:
+                backup_wav = self._last_wav_backup_path()
+                self.hud.set_status("Recovering last dictation...")
+                self.hud.show()
+                ok, out_msg = self.transcribe_file(backup_wav)
+                self.hud.hide()
+                if ok and out_msg:
+                    self._last_wav_untranscribed = False
+                    self._copy_and_paste(
+                        out_msg,
+                        target_hwnd=target_hwnd,
+                        delay_before_paste_s=0.18 if from_tray else 0.0,
+                        show_hud_confirm=True,
+                    )
+                else:
+                    fallback_txt = self.last_dictated or self._load_persisted_last_dictated()
+                    if fallback_txt:
+                        self._copy_and_paste(
+                            fallback_txt,
+                            target_hwnd=target_hwnd,
+                            delay_before_paste_s=0.18 if from_tray else 0.0,
+                            show_hud_confirm=True,
+                        )
+                    else:
+                        self.hud.show_error("Could not recover last dictation", duration_s=2.5)
+
+            threading.Thread(
+                target=_recover_worker,
+                daemon=True,
+                name="bark-recover-last",
+            ).start()
+            return True
+
+        text = self.last_dictated or self._load_persisted_last_dictated()
         if not text:
+            self.hud.show_error("No previous transcript to paste", duration_s=2.2)
             return False
 
+        self.last_dictated = text
         threading.Thread(
             target=self._copy_and_paste,
-            args=(text,),
+            args=(text, target_hwnd, 0.20 if from_tray else 0.0, True),
             daemon=True,
             name="bark-paste-last",
+        ).start()
+        return True
+
+    def paste_history_item(
+        self,
+        text: str,
+        from_tray: bool = True,
+        target_hwnd: int | None = None,
+    ) -> bool:
+        """Paste a specific transcript selected from the rolling 20-item tray history."""
+        clean = (text or "").strip()
+        if not clean:
+            return False
+        threading.Thread(
+            target=self._copy_and_paste,
+            args=(clean, target_hwnd, 0.20 if from_tray else 0.0, True),
+            daemon=True,
+            name="bark-paste-history",
         ).start()
         return True
 

@@ -39,6 +39,8 @@ HOTKEY_ID_STOP = 1
 HOTKEY_ID_DICTATION = 2
 HOTKEY_ID_PASTE_LAST = 3
 HOTKEY_ID_ACTIVE_ESC = 4
+HOTKEY_ID_PASTE_LAST_ALT = 5
+HOTKEY_ID_HANDSFREE = 6
 
 # Win32 Virtual-Key codes for direct physical state queries via GetAsyncKeyState
 VK_LBUTTON = 0x01
@@ -53,6 +55,8 @@ VK_INSERT = 0x2D
 VK_DELETE = 0x2E
 VK_C = 0x43
 VK_X = 0x58
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 VK_LSHIFT = 0xA0
 VK_RSHIFT = 0xA1
 VK_LCONTROL = 0xA2
@@ -67,11 +71,32 @@ DOUBLE_TAP_HOTKEYS: dict[str, tuple[int, str]] = {
     "double_lshift": (VK_LSHIFT, "Double Left Shift"),
 }
 
-# Callback type for the window procedure
+# Callback type for the window procedure and low-level keyboard hook
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(
     LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
 )
+HOOKPROC = ctypes.WINFUNCTYPE(
+    LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+)
+
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+LLKHF_ALTDOWN = 0x0020
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    """Win32 KBDLLHOOKSTRUCT passed via lParam in WH_KEYBOARD_LL callbacks."""
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -150,6 +175,17 @@ user32.CloseClipboard.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
 user32.GetClipboardData.restype = wintypes.HANDLE
 
+user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD,
+]
+user32.SetWindowsHookExW.restype = wintypes.HANDLE
+user32.CallNextHookEx.argtypes = [
+    wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM,
+]
+user32.CallNextHookEx.restype = LRESULT
+user32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+
 kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
@@ -166,6 +202,28 @@ _key_state_lock = threading.Lock()
 def is_vk_down(vk: int) -> bool:
     """Return True if virtual-key ``vk`` is physically held down right now."""
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def attach_input_desktop() -> bool:
+    """Attach the calling thread to the active interactive input desktop ('Default').
+
+    Ensures Win32 RegisterHotKey, GetAsyncKeyState, GetForegroundWindow, SetForegroundWindow,
+    and keybd_event always operate on the user's live desktop even if Audify was spawned
+    from a background service or sandboxed console.
+    """
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        h_desk = u32.OpenInputDesktop(0, False, 0x01FF)
+        if h_desk:
+            ok = bool(u32.SetThreadDesktop(h_desk))
+            k32.SetLastError(0)
+            if not ok:
+                u32.CloseDesktop(h_desk)
+            return ok
+    except Exception:
+        pass
+    return False
 
 
 def is_ctrl_pressed() -> bool:
@@ -479,8 +537,9 @@ class ClipboardListener:
         on_stop_hotkey: Callable[[], None] | None = None,
         dictation_hotkey: str = "double_lctrl",
         on_dictation_hotkey: Callable[[], None] | None = None,
-        paste_last_hotkey: str = "ctrl+alt+v",
+        paste_last_hotkey: str = "alt+shift+z",
         on_paste_last_hotkey: Callable[[], None] | None = None,
+        on_handsfree_hotkey: Callable[[], None] | None = None,
         on_escape_hotkey: Callable[[], None] | None = None,
         stt_enabled: bool = True,
     ) -> None:
@@ -491,6 +550,7 @@ class ClipboardListener:
         self.on_dictation_hotkey = on_dictation_hotkey
         self.paste_last_hotkey = paste_last_hotkey
         self.on_paste_last_hotkey = on_paste_last_hotkey
+        self.on_handsfree_hotkey = on_handsfree_hotkey
         self.on_escape_hotkey = on_escape_hotkey
         self.stt_enabled = bool(stt_enabled)
         self._hwnd: int | None = None
@@ -504,6 +564,8 @@ class ClipboardListener:
         self._hotkey_registered: bool = False
         self._dictation_hotkey_registered: bool = False
         self._paste_last_hotkey_registered: bool = False
+        self._paste_last_alt_registered: bool = False
+        self._handsfree_hotkey_registered: bool = False
         self._esc_guard_registered: bool = False
 
     def _unbind_all_hotkeys(self, hwnd: int) -> None:
@@ -516,6 +578,12 @@ class ClipboardListener:
         if self._paste_last_hotkey_registered:
             user32.UnregisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST)
             self._paste_last_hotkey_registered = False
+        if self._paste_last_alt_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST_ALT)
+            self._paste_last_alt_registered = False
+        if self._handsfree_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_HANDSFREE)
+            self._handsfree_hotkey_registered = False
         if self._esc_guard_registered:
             user32.UnregisterHotKey(hwnd, HOTKEY_ID_ACTIVE_ESC)
             self._esc_guard_registered = False
@@ -528,20 +596,37 @@ class ClipboardListener:
             if user32.RegisterHotKey(hwnd, HOTKEY_ID_STOP, mods | MOD_NOREPEAT, vk):
                 self._hotkey_registered = True
 
+        parsed_paste = parse_win32_hotkey(self.paste_last_hotkey)
+        if parsed_paste and self.on_paste_last_hotkey:
+            p_mods, p_vk = parsed_paste
+            if user32.RegisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST, p_mods | MOD_NOREPEAT, p_vk):
+                self._paste_last_hotkey_registered = True
+
+        # Always keep Alt+Shift+Z (or Ctrl+Alt+V) bound as an alias for Paste Last Transcript
+        alt_hk = "ctrl+alt+v" if (self.paste_last_hotkey or "").strip().lower() == "alt+shift+z" else "alt+shift+z"
+        parsed_alt = parse_win32_hotkey(alt_hk)
+        if parsed_alt and self.on_paste_last_hotkey:
+            a_mods, a_vk = parsed_alt
+            if user32.RegisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST_ALT, a_mods | MOD_NOREPEAT, a_vk):
+                self._paste_last_alt_registered = True
+
         if not self.stt_enabled:
             return
+
+        if self.on_handsfree_hotkey:
+            if user32.RegisterHotKey(
+                hwnd,
+                HOTKEY_ID_HANDSFREE,
+                MOD_CONTROL | MOD_WIN | MOD_NOREPEAT,
+                VK_SPACE,
+            ):
+                self._handsfree_hotkey_registered = True
 
         parsed_dict = parse_win32_hotkey(self.dictation_hotkey)
         if parsed_dict and self.on_dictation_hotkey:
             d_mods, d_vk = parsed_dict
             if user32.RegisterHotKey(hwnd, HOTKEY_ID_DICTATION, d_mods | MOD_NOREPEAT, d_vk):
                 self._dictation_hotkey_registered = True
-
-        parsed_paste = parse_win32_hotkey(self.paste_last_hotkey)
-        if parsed_paste and self.on_paste_last_hotkey:
-            p_mods, p_vk = parsed_paste
-            if user32.RegisterHotKey(hwnd, HOTKEY_ID_PASTE_LAST, p_mods | MOD_NOREPEAT, p_vk):
-                self._paste_last_hotkey_registered = True
 
     def rebind_hotkeys(
         self,
@@ -593,9 +678,14 @@ class ClipboardListener:
                     self.on_dictation_hotkey()
                 except Exception:
                     pass
-            elif wparam == HOTKEY_ID_PASTE_LAST and self.on_paste_last_hotkey:
+            elif wparam in (HOTKEY_ID_PASTE_LAST, HOTKEY_ID_PASTE_LAST_ALT) and self.on_paste_last_hotkey:
                 try:
                     self.on_paste_last_hotkey()
+                except Exception:
+                    pass
+            elif wparam == HOTKEY_ID_HANDSFREE and self.on_handsfree_hotkey:
+                try:
+                    self.on_handsfree_hotkey()
                 except Exception:
                     pass
             elif wparam == HOTKEY_ID_ACTIVE_ESC and self.on_escape_hotkey:
@@ -625,10 +715,88 @@ class ClipboardListener:
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
+    def _ll_kb_proc(self, n_code: int, wparam: int, lparam: int) -> int:
+        """Low-level keyboard hook on the message-pump thread to intercept Alt+Shift+Z and Ctrl+Win+Space cleanly."""
+        if n_code >= 0 and lparam:
+            try:
+                kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                vk = int(kb.vkCode)
+                is_down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                is_up = wparam in (WM_KEYUP, WM_SYSKEYUP)
+                if vk in (VK_MENU, VK_LMENU, VK_RMENU):
+                    self._ll_alt_down = is_down and not is_up
+                elif vk in (VK_SHIFT, VK_LSHIFT, VK_RSHIFT):
+                    self._ll_shift_down = is_down and not is_up
+                elif vk in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
+                    self._ll_ctrl_down = is_down and not is_up
+                elif vk in (VK_LWIN, VK_RWIN):
+                    self._ll_win_down = is_down and not is_up
+                elif vk == 0x5A and is_down:
+                    alt_on = (
+                        getattr(self, "_ll_alt_down", False)
+                        or bool(kb.flags & LLKHF_ALTDOWN)
+                        or is_vk_down(VK_MENU)
+                    )
+                    shift_on = (
+                        getattr(self, "_ll_shift_down", False)
+                        or is_vk_down(VK_SHIFT)
+                    )
+                    ctrl_on = (
+                        getattr(self, "_ll_ctrl_down", False)
+                        or is_vk_down(VK_CONTROL)
+                    )
+                    if alt_on and shift_on and not ctrl_on and self.on_paste_last_hotkey:
+                        if self._hwnd:
+                            user32.PostMessageW(
+                                self._hwnd, WM_HOTKEY, HOTKEY_ID_PASTE_LAST, 0
+                            )
+                        return 1
+                elif vk == VK_SPACE and is_down:
+                    ctrl_on = (
+                        getattr(self, "_ll_ctrl_down", False)
+                        or is_vk_down(VK_CONTROL)
+                    )
+                    win_on = (
+                        getattr(self, "_ll_win_down", False)
+                        or is_vk_down(VK_LWIN)
+                        or is_vk_down(VK_RWIN)
+                    )
+                    alt_on = (
+                        getattr(self, "_ll_alt_down", False)
+                        or bool(kb.flags & LLKHF_ALTDOWN)
+                        or is_vk_down(VK_MENU)
+                    )
+                    shift_on = (
+                        getattr(self, "_ll_shift_down", False)
+                        or is_vk_down(VK_SHIFT)
+                    )
+                    if (
+                        ctrl_on
+                        and win_on
+                        and not alt_on
+                        and not shift_on
+                        and self.stt_enabled
+                        and self.on_handsfree_hotkey
+                    ):
+                        if self._hwnd:
+                            user32.PostMessageW(
+                                self._hwnd, WM_HOTKEY, HOTKEY_ID_HANDSFREE, 0
+                            )
+                        return 1
+            except Exception:
+                pass
+        return user32.CallNextHookEx(None, n_code, wparam, lparam)
+
     def _run(self) -> None:
         """Background thread: register window class, create hidden window, run message pump."""
+        attach_input_desktop()
         h_inst = kernel32.GetModuleHandleW(None)
         self._wnd_proc_ref = WNDPROC(self._wnd_proc)
+        self._ll_alt_down = False
+        self._ll_shift_down = False
+        self._ll_ctrl_down = False
+        self._ll_win_down = False
+        self._ll_hook_ref = HOOKPROC(self._ll_kb_proc)
 
         wc = WNDCLASSEXW()
         wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
@@ -658,6 +826,7 @@ class ClipboardListener:
 
         # Register native Win32 global hotkeys (stop, dictation, paste-last) on this message pump
         self._bind_all_hotkeys(self._hwnd)
+        ll_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._ll_hook_ref, None, 0)
 
         # Snapshot current clipboard so we don't fire on startup
         try:
@@ -675,6 +844,8 @@ class ClipboardListener:
             user32.DispatchMessageW(ctypes.byref(msg))
 
         # Cleanup
+        if ll_hook:
+            user32.UnhookWindowsHookEx(ll_hook)
         self._unbind_all_hotkeys(self._hwnd)
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.UnregisterClassW(self._class_name, h_inst)

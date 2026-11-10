@@ -251,8 +251,8 @@ DEFAULT_CONFIG: dict = {
     "theme_mode": "system",
     "stop_hotkey": "ctrl+alt+s",
     "dictation_hotkey": "double_lctrl",
-    "paste_last_hotkey": "ctrl+alt+v",
-    "stt_silence_delay": 1.2,
+    "paste_last_hotkey": "alt+shift+z",
+    "stt_silence_delay": 1.1,
     "groq_api_key": "",
     "groq_model": "whisper-large-v3",
     "pronunciation_dict": {},
@@ -316,7 +316,7 @@ VOLUMES: dict[str, float] = {
 STT_SILENCE_DELAYS: dict[str, float] = {
     "0.6s (Ultra Fast)": 0.6,
     "0.8s (Fast)": 0.8,
-    "1.0s (Balanced)": 1.0,
+    "1.1s (Balanced)": 1.1,
     "1.4s (Relaxed)": 1.4,
     "2.0s (Long Pauses)": 2.0,
 }
@@ -400,8 +400,16 @@ def load_config() -> dict:
         config["dictation_hotkey"] = "double_lctrl"
         config["dictation_hotkey_migrated_v299"] = True
         stt_changed = True
+    if config.get("paste_last_hotkey") == "ctrl+alt+v" and not config.get("paste_last_hotkey_migrated_v2925"):
+        config["paste_last_hotkey"] = "alt+shift+z"
+        config["paste_last_hotkey_migrated_v2925"] = True
+        stt_changed = True
     if not isinstance(config.get("stt_silence_delay"), (int, float)):
-        config["stt_silence_delay"] = 1.0
+        config["stt_silence_delay"] = 1.1
+        stt_changed = True
+    elif abs(float(config.get("stt_silence_delay", 1.1)) - 0.8) < 0.05 and not config.get("stt_silence_delay_migrated_v2927"):
+        config["stt_silence_delay"] = 1.1
+        config["stt_silence_delay_migrated_v2927"] = True
         stt_changed = True
     if config.get("theme_mode") not in ("system", "light", "dark"):
         config["theme_mode"] = "system"

@@ -183,6 +183,8 @@ def main() -> None:
 
     # Import here (not at top) so the mutex check runs before any
     # heavy module initialization (pygame, pystray, etc.)
+    from audify.clipboard import attach_input_desktop
+    attach_input_desktop()
     from audify.tray import setup_tray
 
     setup_tray()
